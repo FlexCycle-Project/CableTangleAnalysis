@@ -2,15 +2,18 @@
 #include "Demos/Visualization/MiniGL.h"
 #include "Simulation/TimeManager.h"
 #include "Simulation/SimulationModel.h"
+#include "Simulation/Constraints.h"
 #include "Demos/Common/DemoBase.h"
 #include "Simulation/Simulation.h"
+#include "Utils/FileSystem.h"
 
 #include <Eigen/Dense>
 #include <iostream>
 #include <vector>
-#include <random>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
@@ -41,24 +44,27 @@ struct RopeConfig
 struct PhysicsConfig
 {
     Real timeStep = static_cast<Real>(0.005);
-    Real pullForce = static_cast<Real>(500.0);
-    Real pullStep = static_cast<Real>(10.0);
+    Real pullSpring = static_cast<Real>(1000.0);
+    Real pullDamping = static_cast<Real>(2.0);
+    Real pullMaxAccel = static_cast<Real>(1000.0);
+    Real targetStep = static_cast<Real>(0.05);
     Real velocityRecomputeBlend = static_cast<Real>(0.05);
-    bool usePullA = true;
-    bool usePullB = true;
 };
 
-// Direct controls for the random sphere-mess mode.
-struct RandomShapeConfig
+// Slow bend/twist rest-state creep makes the rod behave more like a cable.
+struct RestShapeCreepConfig
 {
-    unsigned int seed = 4;
-    unsigned int controlPointCount = 50;
-    int smoothIterations = 1;
-    Real smoothAlpha = static_cast<Real>(0.30);
+    bool enabled = true;
+    unsigned int stepInterval = 20;
+    Real creep = static_cast<Real>(0.01);
+    Real activationThreshold = static_cast<Real>(1e-4);
+};
+
+// Endpoints for the straight cable layout.
+struct CableLayoutConfig
+{
     Real endpointX = static_cast<Real>(10.0);
     Real height = static_cast<Real>(6.0);
-    Real sphereRadius = static_cast<Real>(2.0);
-    Real generatorStepSize = static_cast<Real>(1);
 };
 
 // Tuning for the custom rope self-collision pass.
@@ -80,7 +86,8 @@ struct AppConfig
 {
     RopeConfig rope;
     PhysicsConfig physics;
-    RandomShapeConfig random;
+    RestShapeCreepConfig restCreep;
+    CableLayoutConfig layout;
     Real groundY = static_cast<Real>(0.0);
     SelfCollisionConfig selfCollision;
 };
@@ -115,47 +122,19 @@ struct VelocityPairCorrection
     Vector3r nrm;
 };
 
-// Derived layout for random mode before we build the actual polyline.
-struct RandomCableLayout
-{
-    Vector3r startPoint;
-    Vector3r endPoint;
-    Vector3r sphereEntry;
-    Vector3r sphereExit;
-};
-
 static void buildModel();
 static void reset();
 static void timeStep();
 static void render();
 
-static std::vector<Vector3r> generateRandomCablePolyline(
-    const RandomShapeConfig& randomCfg,
+static std::vector<Vector3r> generateStraightCablePolyline(
+    const CableLayoutConfig& layoutCfg,
     const RopeConfig& ropeCfg);
-
-static RandomCableLayout makeRandomCableLayout(const RandomShapeConfig& randomCfg);
 
 static void addCableModel(
     SimulationModel* model,
     std::vector<Vector3r>& ropePoints,
     const RopeConfig& ropeCfg);
-
-static std::vector<Vector3r> generateRandomPolylineInSphere(
-    const Vector3r& start,
-    const Vector3r& end,
-    int controlCount,
-    Real sphereRadius,
-    Real generatorStepSize,
-    unsigned int seed);
-
-static void smoothPolyline(
-    std::vector<Vector3r>& points,
-    int iterations,
-    Real alpha);
-
-static std::vector<Vector3r> resamplePolylineByLength(
-    const std::vector<Vector3r>& polyline,
-    int wantedCount);
 
 static void applyGroundConstraint(Real groundY);
 static void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig& physicsCfg);
@@ -188,18 +167,29 @@ collectSelfCollisionCandidatesSpatialHash(
     Real inflate,
     Real cellSize);
 
+static std::string getCableSnapshotPath();
+static bool saveCurrentCableSnapshot();
+static bool loadCableSnapshot(std::vector<Vector3r>& ropePoints);
+static void applyBendTwistRestStateCreep(
+    SimulationModel* model,
+    const RestShapeCreepConfig& creepCfg);
+
 static DemoBase* base = nullptr;
 static AppConfig g_cfg;
 static unsigned int g_firstParticle = 0;
 static unsigned int g_lastParticle = 0;
+static Vector3r g_targetA(0.0, 0.0, 0.0);
+static Vector3r g_targetB(0.0, 0.0, 0.0);
+static bool g_useSavedCableSnapshot = false;
+static unsigned int g_restCreepCounter = 0;
 
 int main(int argc, char** argv)
 {
-    std::cout << "Random sphere mess demo" << std::endl;
+    std::cout << "Straight cable demo" << std::endl;
 
     base = new DemoBase();
 
-    base->init(argc, argv, "Random Sphere Mess Demo");
+    base->init(argc, argv, "Straight Cable Demo");
 
     SimulationModel* model = new SimulationModel();
     model->init();
@@ -207,16 +197,40 @@ int main(int argc, char** argv)
 
     buildModel();
 
+    // Keyboard input for this demo lives here.
     MiniGL::setClientIdleFunc(timeStep);
     MiniGL::setClientSceneFunc(render);
     MiniGL::addKeyFunc('r', reset);
-    MiniGL::addKeyFunc('1', []() { g_cfg.physics.usePullA = !g_cfg.physics.usePullA; });
-    MiniGL::addKeyFunc('2', []() { g_cfg.physics.usePullB = !g_cfg.physics.usePullB; });
-    MiniGL::addKeyFunc('e', []() { g_cfg.physics.pullForce += g_cfg.physics.pullStep; });
-    MiniGL::addKeyFunc('d', []() {
-        g_cfg.physics.pullForce =
-            std::max(static_cast<Real>(0.0), g_cfg.physics.pullForce - g_cfg.physics.pullStep);
+    MiniGL::addKeyFunc('o', []() {
+        if (saveCurrentCableSnapshot())
+        {
+            g_useSavedCableSnapshot = true;
+            std::cout << "Saved cable snapshot. Reset now rebuilds from saved data." << std::endl;
+        }
     });
+    MiniGL::addKeyFunc('p', []() {
+        g_useSavedCableSnapshot = false;
+        reset();
+        std::cout << "Snapshot replay disabled. Rebuilt straight cable." << std::endl;
+    });
+    MiniGL::addKeyFunc('z', []() { MiniGL::move(0, 0, -0.5); });
+    MiniGL::addKeyFunc('x', []() { MiniGL::move(0, 0, 0.5); });
+
+    // E/D/F/S/C/V now move the magenta target.
+    MiniGL::addKeyFunc('e', []() { g_targetB.z() += g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('d', []() { g_targetB.z() -= g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('f', []() { g_targetB.x() -= g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('s', []() { g_targetB.x() += g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('c', []() { g_targetB.y() -= g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('v', []() { g_targetB.y() += g_cfg.physics.targetStep; });
+
+    // I/K/L/J/N/M now move the yellow target.
+    MiniGL::addKeyFunc('i', []() { g_targetA.z() += g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('k', []() { g_targetA.z() -= g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('l', []() { g_targetA.x() -= g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('j', []() { g_targetA.x() += g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('n', []() { g_targetA.y() -= g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('m', []() { g_targetA.y() += g_cfg.physics.targetStep; });
 
     MiniGL::setViewport(
         40.0f, 0.1f, 500.0f,
@@ -245,84 +259,189 @@ static void buildModel()
     TimeManager::getCurrent()->setTimeStepSize(g_cfg.physics.timeStep);
 
     SimulationModel* model = Simulation::getCurrent()->getModel();
-    std::vector<Vector3r> ropePoints =
-        generateRandomCablePolyline(g_cfg.random, g_cfg.rope);
+    std::vector<Vector3r> ropePoints;
+    if (!g_useSavedCableSnapshot || !loadCableSnapshot(ropePoints))
+    {
+        ropePoints = generateStraightCablePolyline(g_cfg.layout, g_cfg.rope);
+        if (g_useSavedCableSnapshot)
+        {
+            std::cout << "Saved cable snapshot missing or invalid. Falling back to straight cable."
+                      << std::endl;
+            g_useSavedCableSnapshot = false;
+        }
+    }
 
     addCableModel(model, ropePoints, g_cfg.rope);
+
+    if (g_firstParticle < model->getParticles().getNumberOfParticles() &&
+        g_lastParticle < model->getParticles().getNumberOfParticles())
+    {
+        g_targetA = model->getParticles().getPosition(g_firstParticle);
+        g_targetB = model->getParticles().getPosition(g_lastParticle);
+    }
 
     std::cout << "Built cable with "
               << model->getParticles().getNumberOfParticles()
               << " particles." << std::endl;
 }
 
-static std::vector<Vector3r> generateRandomCablePolyline(
-    const RandomShapeConfig& randomCfg,
+static std::vector<Vector3r> generateStraightCablePolyline(
+    const CableLayoutConfig& layoutCfg,
     const RopeConfig& ropeCfg)
 {
-    const RandomCableLayout layout = makeRandomCableLayout(randomCfg);
-
-    // Build a coarse random path inside the sphere, smooth it, then resample
-    // the full path to the final rope particle count.
-    std::vector<Vector3r> middlePoints = generateRandomPolylineInSphere(
-        layout.sphereEntry,
-        layout.sphereExit,
-        static_cast<int>(randomCfg.controlPointCount),
-        randomCfg.sphereRadius,
-        randomCfg.generatorStepSize,
-        randomCfg.seed);
-
-    smoothPolyline(
-        middlePoints,
-        randomCfg.smoothIterations,
-        randomCfg.smoothAlpha);
-
-    if (!middlePoints.empty())
-    {
-        middlePoints.front() = layout.sphereEntry;
-        middlePoints.back() = layout.sphereExit;
-    }
-
-    std::vector<Vector3r> controlPoints;
-    controlPoints.reserve(middlePoints.size() + 2);
-    controlPoints.push_back(layout.startPoint);
-    for (const auto& p : middlePoints)
-        controlPoints.push_back(p);
-    controlPoints.push_back(layout.endPoint);
-
-    Real totalLength = static_cast<Real>(0.0);
-    for (size_t i = 1; i < controlPoints.size(); ++i)
-        totalLength += (controlPoints[i] - controlPoints[i - 1]).norm();
-
+    const Vector3r startPoint(
+        -layoutCfg.endpointX,
+        layoutCfg.height,
+        static_cast<Real>(0.0));
+    const Vector3r endPoint(
+        layoutCfg.endpointX,
+        layoutCfg.height,
+        static_cast<Real>(0.0));
+    const Real totalLength = (endPoint - startPoint).norm();
     const int particleCount =
         std::max(2, static_cast<int>(std::ceil(totalLength / ropeCfg.dx)) + 1);
 
-    std::vector<Vector3r> ropePoints =
-        resamplePolylineByLength(controlPoints, particleCount);
-    if (!ropePoints.empty())
+    std::vector<Vector3r> ropePoints;
+    ropePoints.reserve(particleCount);
+
+    for (int i = 0; i < particleCount; ++i)
     {
-        ropePoints.front() = layout.startPoint;
-        ropePoints.back() = layout.endPoint;
+        const Real t =
+            static_cast<Real>(i) / static_cast<Real>(std::max(1, particleCount - 1));
+        ropePoints.push_back(
+            (static_cast<Real>(1.0) - t) * startPoint + t * endPoint);
     }
 
     return ropePoints;
 }
 
-static RandomCableLayout makeRandomCableLayout(const RandomShapeConfig& randomCfg)
+static std::string getCableSnapshotPath()
 {
-    const Vector3r axis(1.0, 0.0, 0.0);
-    const Vector3r startPoint(
-        -randomCfg.endpointX,
-        randomCfg.height,
-        static_cast<Real>(0.0));
-    const Vector3r endPoint(randomCfg.endpointX, randomCfg.height, static_cast<Real>(0.0));
-    const Vector3r sphereCenter(static_cast<Real>(0.0), randomCfg.height, static_cast<Real>(0.0));
+    return Utilities::FileSystem::normalizePath(
+        base->getOutputPath() + "/saved_cable/snapshot.txt");
+}
 
-    return RandomCableLayout{
-        startPoint,
-        endPoint,
-        sphereCenter - randomCfg.sphereRadius * axis,
-        sphereCenter + randomCfg.sphereRadius * axis
-    };
+static bool saveCurrentCableSnapshot()
+{
+    if (base == nullptr)
+        return false;
+
+    SimulationModel* model = Simulation::getCurrent()->getModel();
+    if (model == nullptr)
+        return false;
+
+    const ParticleData& particles = model->getParticles();
+    if (g_firstParticle >= particles.getNumberOfParticles() ||
+        g_lastParticle >= particles.getNumberOfParticles() ||
+        g_firstParticle > g_lastParticle)
+    {
+        return false;
+    }
+
+    const std::string snapshotPath = getCableSnapshotPath();
+    Utilities::FileSystem::makeDirs(Utilities::FileSystem::getFilePath(snapshotPath));
+
+    std::ofstream out(snapshotPath);
+    if (!out.is_open())
+    {
+        std::cout << "Failed to open snapshot file: " << snapshotPath << std::endl;
+        return false;
+    }
+
+    out << (g_lastParticle - g_firstParticle + 1) << "\n";
+    out << std::setprecision(17);
+    for (unsigned int i = g_firstParticle; i <= g_lastParticle; ++i)
+    {
+        const Vector3r& p = particles.getPosition(i);
+        out << p.x() << " " << p.y() << " " << p.z() << "\n";
+    }
+
+    std::cout << "Cable snapshot saved to: " << snapshotPath << std::endl;
+    return true;
+}
+
+static bool loadCableSnapshot(std::vector<Vector3r>& ropePoints)
+{
+    ropePoints.clear();
+
+    if (base == nullptr)
+        return false;
+
+    std::ifstream in(getCableSnapshotPath());
+    if (!in.is_open())
+        return false;
+
+    size_t count = 0;
+    in >> count;
+    if (!in.good() || count < 2)
+        return false;
+
+    ropePoints.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        Real x, y, z;
+        in >> x >> y >> z;
+        if (!in.good())
+        {
+            ropePoints.clear();
+            return false;
+        }
+        ropePoints.emplace_back(x, y, z);
+    }
+
+    return true;
+}
+
+static void applyBendTwistRestStateCreep(
+    SimulationModel* model,
+    const RestShapeCreepConfig& creepCfg)
+{
+    if (!creepCfg.enabled || model == nullptr)
+        return;
+
+    g_restCreepCounter++;
+    if (creepCfg.stepInterval == 0 || (g_restCreepCounter % creepCfg.stepInterval) != 0)
+        return;
+
+    OrientationData& orientations = model->getOrientations();
+    SimulationModel::ConstraintVector& constraints = model->getConstraints();
+
+    for (Constraint* constraint : constraints)
+    {
+        if (constraint == nullptr || constraint->getTypeId() != BendTwistConstraint::TYPE_ID)
+            continue;
+
+        BendTwistConstraint* bendTwist = static_cast<BendTwistConstraint*>(constraint);
+        const unsigned int q0Index = bendTwist->m_bodies[0];
+        const unsigned int q1Index = bendTwist->m_bodies[1];
+        if (q0Index >= orientations.getNumberOfQuaternions() ||
+            q1Index >= orientations.getNumberOfQuaternions())
+        {
+            continue;
+        }
+
+        Quaternionr currentRelative =
+            orientations.getQuaternion(q0Index).conjugate() *
+            orientations.getQuaternion(q1Index);
+        currentRelative.normalize();
+
+        Quaternionr& restRelative = bendTwist->m_restDarbouxVector;
+        if (restRelative.dot(currentRelative) < static_cast<Real>(0.0))
+            currentRelative.coeffs() *= static_cast<Real>(-1.0);
+
+        const Real mismatch =
+            (restRelative.coeffs() - currentRelative.coeffs()).squaredNorm();
+        if (mismatch < creepCfg.activationThreshold)
+            continue;
+
+        Eigen::Matrix<Real, 4, 1> blendedCoeffs =
+            (static_cast<Real>(1.0) - creepCfg.creep) * restRelative.coeffs() +
+            creepCfg.creep * currentRelative.coeffs();
+
+        const Real norm = blendedCoeffs.norm();
+        if (norm > static_cast<Real>(1e-12))
+            restRelative.coeffs() = blendedCoeffs / norm;
+    }
 }
 
 static void addCableModel(
@@ -424,248 +543,6 @@ static void addCableModel(
     }
 }
 
-static std::vector<Vector3r> generateRandomPolylineInSphere(
-    const Vector3r& start,
-    const Vector3r& end,
-    int controlCount,
-    Real sphereRadius,
-    Real generatorStepSize,
-    unsigned int seed)
-{
-    std::mt19937 rng(seed);
-    std::normal_distribution<Real> normal01(0.0, 1.0);
-    const Vector3r sphereCenter = static_cast<Real>(0.5) * (start + end);
-
-    auto randomUnitVector = [&]() -> Vector3r
-    {
-        Vector3r v;
-        do
-        {
-            v = Vector3r(normal01(rng), normal01(rng), normal01(rng));
-        }
-        while (v.squaredNorm() < static_cast<Real>(1e-10));
-
-        v.normalize();
-        return v;
-    };
-
-    auto projectInsideSphere = [&](Vector3r p) -> Vector3r
-    {
-        const Vector3r d = p - sphereCenter;
-        const Real n = d.norm();
-        if (n > sphereRadius && n > static_cast<Real>(1e-12))
-            p = sphereCenter + (sphereRadius / n) * d;
-        return p;
-    };
-
-    auto validPoint = [&](const Vector3r& p) -> bool
-    {
-        return (p - sphereCenter).squaredNorm() <= sphereRadius * sphereRadius;
-    };
-
-    std::vector<Vector3r> points;
-    points.reserve(controlCount);
-    points.push_back(start);
-
-    Vector3r prevDir = end - start;
-    if (prevDir.squaredNorm() < static_cast<Real>(1e-12))
-        prevDir = Vector3r(1, 0, 0);
-    else
-        prevDir.normalize();
-
-    for (int i = 1; i < controlCount - 1; ++i)
-    {
-        const Vector3r current = points.back();
-        const int remainingSegments = controlCount - 1 - i;
-        Vector3r bestCandidate = current;
-        Real bestScore = -std::numeric_limits<Real>::max();
-        bool found = false;
-
-        for (int trial = 0; trial < 60; ++trial)
-        {
-            Vector3r dirToEnd = end - current;
-            if (dirToEnd.squaredNorm() > static_cast<Real>(1e-12))
-                dirToEnd.normalize();
-            else
-                dirToEnd = prevDir;
-
-            Vector3r radialDir = current - sphereCenter;
-            if (radialDir.squaredNorm() > static_cast<Real>(1e-12))
-                radialDir.normalize();
-            else
-                radialDir = randomUnitVector();
-
-            Vector3r tangentDir = prevDir.cross(radialDir);
-            if (tangentDir.squaredNorm() < static_cast<Real>(1e-12))
-                tangentDir = randomUnitVector();
-            else
-                tangentDir.normalize();
-
-            Vector3r randomDir = randomUnitVector();
-
-            Vector3r dir =
-                static_cast<Real>(0.18) * dirToEnd +
-                static_cast<Real>(0.28) * prevDir +
-                static_cast<Real>(0.34) * tangentDir +
-                static_cast<Real>(0.20) * randomDir;
-
-            if (dir.squaredNorm() < static_cast<Real>(1e-12))
-                dir = dirToEnd;
-
-            dir.normalize();
-
-            Vector3r candidate = projectInsideSphere(current + generatorStepSize * dir);
-
-            if (!validPoint(candidate))
-                continue;
-
-            const Real distToEnd = (end - candidate).norm();
-            const Real maxReach =
-                static_cast<Real>(remainingSegments) * generatorStepSize * static_cast<Real>(1.55);
-            const Real minReach =
-                static_cast<Real>(remainingSegments) * generatorStepSize * static_cast<Real>(0.10);
-
-            if (distToEnd > maxReach)
-                continue;
-
-            Real minOldDist = std::numeric_limits<Real>::max();
-            for (size_t k = 0; k < points.size(); ++k)
-                minOldDist = std::min(minOldDist, (candidate - points[k]).norm());
-
-            const Real radial =
-                (candidate - sphereCenter).norm() /
-                std::max(static_cast<Real>(1e-8), sphereRadius);
-
-            Real score = static_cast<Real>(0.0);
-            score += static_cast<Real>(0.35) * radial;
-            score += static_cast<Real>(0.20) * std::max(static_cast<Real>(0.0), dir.dot(prevDir));
-            score -= static_cast<Real>(0.10) * distToEnd;
-
-            if (minOldDist < static_cast<Real>(0.45) * generatorStepSize)
-                score -= static_cast<Real>(4.0);
-            else if (minOldDist < static_cast<Real>(1.10) * generatorStepSize)
-                score += static_cast<Real>(0.35);
-
-            if (distToEnd < minReach)
-                score -= static_cast<Real>(1.5);
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestCandidate = candidate;
-                found = true;
-            }
-        }
-
-        if (!found)
-        {
-            Vector3r fallbackDir = end - current;
-            if (fallbackDir.squaredNorm() < static_cast<Real>(1e-12))
-                fallbackDir = prevDir;
-            else
-                fallbackDir.normalize();
-
-            bestCandidate = projectInsideSphere(current + generatorStepSize * fallbackDir);
-        }
-
-        Vector3r newDir = bestCandidate - current;
-        if (newDir.squaredNorm() > static_cast<Real>(1e-12))
-            prevDir = newDir.normalized();
-
-        points.push_back(bestCandidate);
-    }
-
-    points.push_back(end);
-    return points;
-}
-
-static void smoothPolyline(
-    std::vector<Vector3r>& points,
-    int iterations,
-    Real alpha)
-{
-    if (points.size() < 3)
-        return;
-
-    // Lightweight Laplacian smoothing with pinned endpoints.
-    const Vector3r firstLocked = points.front();
-    const Vector3r lastLocked = points.back();
-
-    for (int iter = 0; iter < iterations; ++iter)
-    {
-        const std::vector<Vector3r> oldPoints = points;
-
-        for (size_t i = 1; i + 1 < points.size(); ++i)
-        {
-            const Vector3r neighborAverage =
-                static_cast<Real>(0.5) * (oldPoints[i - 1] + oldPoints[i + 1]);
-
-            points[i] = oldPoints[i] + alpha * (neighborAverage - oldPoints[i]);
-        }
-
-        points.front() = firstLocked;
-        points.back() = lastLocked;
-    }
-}
-
-static std::vector<Vector3r> resamplePolylineByLength(
-    const std::vector<Vector3r>& polyline,
-    int wantedCount)
-{
-    std::vector<Vector3r> result;
-
-    if (polyline.size() < 2 || wantedCount < 2)
-        return result;
-
-    std::vector<Real> cumulativeLength(polyline.size(), 0.0);
-    for (size_t i = 1; i < polyline.size(); ++i)
-    {
-        cumulativeLength[i] =
-            cumulativeLength[i - 1] +
-            (polyline[i] - polyline[i - 1]).norm();
-    }
-
-    const Real totalLength = cumulativeLength.back();
-    if (totalLength < static_cast<Real>(1e-8))
-    {
-        result.assign(wantedCount, polyline.front());
-        return result;
-    }
-
-    // Uniform arc-length spacing keeps rod particles distributed evenly even
-    // when the source polyline is very non-uniform.
-    const Real spacing = totalLength / static_cast<Real>(wantedCount - 1);
-    result.reserve(wantedCount);
-
-    size_t currentSegment = 0;
-    for (int k = 0; k < wantedCount; ++k)
-    {
-        const Real targetDistance = spacing * static_cast<Real>(k);
-        while (currentSegment + 1 < cumulativeLength.size() &&
-               cumulativeLength[currentSegment + 1] < targetDistance)
-        {
-            currentSegment++;
-        }
-
-        if (currentSegment + 1 >= polyline.size())
-        {
-            result.push_back(polyline.back());
-            continue;
-        }
-
-        const Real s0 = cumulativeLength[currentSegment];
-        const Real s1 = cumulativeLength[currentSegment + 1];
-        const Real segmentLength = std::max(static_cast<Real>(1e-8), s1 - s0);
-        const Real t = (targetDistance - s0) / segmentLength;
-
-        const Vector3r p =
-            (static_cast<Real>(1.0) - t) * polyline[currentSegment] +
-            t * polyline[currentSegment + 1];
-        result.push_back(p);
-    }
-
-    return result;
-}
 
 static void timeStep()
 {
@@ -681,8 +558,7 @@ static void timeStep()
 
     for (unsigned int step = 0; step < stepsPerFrame; ++step)
     {
-        if (g_cfg.physics.usePullA || g_cfg.physics.usePullB)
-            applyPullForces(model, dt, g_cfg.physics);
+        applyPullForces(model, dt, g_cfg.physics);
 
         Simulation::getCurrent()->getTimeStep()->step(*model);
 
@@ -708,6 +584,8 @@ static void timeStep()
             applyGroundConstraint(g_cfg.groundY);
         }
 
+        applyBendTwistRestStateCreep(model, g_cfg.restCreep);
+
         base->step();
     }
 }
@@ -716,23 +594,30 @@ static void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig
 {
     ParticleData& particles = model->getParticles();
 
-    // Endpoint pulls are applied directly as velocity changes each step.
-    auto applyForce = [&](unsigned int particleIndex, const Vector3r& forceDir)
+    // Targets act like damped springs at the velocity level, so they steer
+    // the ends without hard-position pinning them.
+    auto pullOneParticle = [&](unsigned int particleIndex, const Vector3r& target)
     {
         if (particleIndex >= particles.getNumberOfParticles())
             return;
         if (particles.getMass(particleIndex) <= 0.0)
             return;
 
+        const Vector3r position = particles.getPosition(particleIndex);
         Vector3r& velocity = particles.getVelocity(particleIndex);
-        velocity += dt * physicsCfg.pullForce * forceDir;
+        Vector3r acceleration =
+            physicsCfg.pullSpring * (target - position) -
+            physicsCfg.pullDamping * velocity;
+
+        const Real accelNorm = acceleration.norm();
+        if (accelNorm > physicsCfg.pullMaxAccel)
+            acceleration *= (physicsCfg.pullMaxAccel / accelNorm);
+
+        velocity += dt * acceleration;
     };
 
-    if (physicsCfg.usePullA)
-        applyForce(g_lastParticle, Vector3r(1.0, 0.0, 0.0));
-
-    if (physicsCfg.usePullB)
-        applyForce(g_firstParticle, Vector3r(-1.0, 0.0, 0.0));
+    pullOneParticle(g_firstParticle, g_targetA);
+    pullOneParticle(g_lastParticle, g_targetB);
 }
 
 static Real clamp01(Real x)
@@ -1133,12 +1018,15 @@ static void applySelfCollisionXPBD(
 
 static void render()
 {
+    // `base->render()` is the built-in demo GUI + scene helper rendering.
     base->render();
 
     SimulationModel* model = Simulation::getCurrent()->getModel();
     const ParticleData& particles = model->getParticles();
 
     float blue[4] = {0.0f, 0.0f, 0.8f, 1.0f};
+    float yellow[4] = {1.0f, 0.9f, 0.1f, 1.0f};
+    float magenta[4] = {0.9f, 0.1f, 0.9f, 1.0f};
 
     // Render the rod centerline as spheres plus cylinders.
     for (unsigned int m = 0; m < model->getLineModels().size(); ++m)
@@ -1154,13 +1042,16 @@ static void render()
             const Vector3r& p0 = particles.getPosition(i0);
             const Vector3r& p1 = particles.getPosition(i1);
 
-            MiniGL::drawSphere(p0, 0.07f, blue);
+            MiniGL::drawSphere(p0, 0.03f, blue);
             if (e == lineModel->getEdges().size() - 1)
-                MiniGL::drawSphere(p1, 0.07f, blue);
+                MiniGL::drawSphere(p1, 0.03f, blue);
 
             MiniGL::drawCylinder(p0, p1, blue, static_cast<float>(g_cfg.rope.renderRadius));
         }
     }
+
+    MiniGL::drawSphere(g_targetA, 0.08f, yellow);
+    MiniGL::drawSphere(g_targetB, 0.08f, magenta);
 }
 
 static void applyGroundConstraint(Real groundY)
