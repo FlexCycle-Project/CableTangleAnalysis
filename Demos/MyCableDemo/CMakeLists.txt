@@ -25,6 +25,8 @@ endif()
 
 add_executable(MyCableDemo
 	  main.cpp
+	  KymoKnotAnalyzer.cpp
+	  KymoKnotAnalyzer.h
 
 	  ../Common/LogWindow.cpp
 	  ../Common/LogWindow.h

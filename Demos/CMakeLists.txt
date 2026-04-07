@@ -2,17 +2,6 @@ include(Visualization/CMakeLists.txt)
 
 # search all demos
 set(PBD_DEMOS 
-	BarDemo
-	ClothDemo
-	CosseratRodsDemo
-	CouplingDemos
-	DistanceFieldDemos
-	FluidDemo
-	GenericConstraintsDemos
-	PositionBasedElasticRodsDemo
-	RigidBodyDemos
-	SceneLoaderDemo
-	StiffRodsDemos
 	MyCableDemo
 )
 

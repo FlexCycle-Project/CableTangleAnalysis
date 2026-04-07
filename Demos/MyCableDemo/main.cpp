@@ -6,6 +6,7 @@
 #include "Demos/Common/DemoBase.h"
 #include "Simulation/Simulation.h"
 #include "Utils/FileSystem.h"
+#include "KymoKnotAnalyzer.h"
 
 #include <Eigen/Dense>
 #include <iostream>
@@ -18,6 +19,8 @@
 #include <unordered_set>
 #include <cstdint>
 #include <limits>
+#include <sstream>
+#include <utility>
 
 #if defined(_DEBUG) && !defined(EIGEN_ALIGN)
 #define new DEBUG_NEW
@@ -71,14 +74,14 @@ struct CableLayoutConfig
 struct SelfCollisionConfig
 {
     bool enabled = true;
-    Real ropeRadius = static_cast<Real>(0.06);
-    Real compliance = static_cast<Real>(1e-8);
-    unsigned int iterations = 4;
+    Real ropeRadius = static_cast<Real>(0.08);
+    Real compliance = static_cast<Real>(1e-10);
+    unsigned int iterations = 6;
     Real excludeArcLength = static_cast<Real>(0.9);
     Real normalDamping = static_cast<Real>(0.2);
     Real tangentialDamping = static_cast<Real>(0.08);
-    Real maxCorrection = static_cast<Real>(0.015);
-    Real hashCellSize = static_cast<Real>(0.25);
+    Real maxCorrection = static_cast<Real>(0.05);
+    Real hashCellSize = static_cast<Real>(0.2);
 };
 
 // Single source of truth for the demo.
@@ -120,6 +123,12 @@ struct VelocityPairCorrection
     unsigned int i0, i1, j0, j1;
     Real wP0, wP1, wQ0, wQ1;
     Vector3r nrm;
+};
+
+struct SelfCollisionContact
+{
+    unsigned int edgeA;
+    unsigned int edgeB;
 };
 
 static void buildModel();
@@ -167,12 +176,50 @@ collectSelfCollisionCandidatesSpatialHash(
     Real inflate,
     Real cellSize);
 
+static std::vector<SelfCollisionContact> detectSelfCollisionContacts(
+    SimulationModel* model,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg);
+static unsigned int countSelfCollisionContactClusters(
+    const std::vector<SelfCollisionContact>& contacts);
+static void printSelfCollisionContacts(
+    const std::vector<SelfCollisionContact>& contacts);
+static void printTanglementMetrics(
+    SimulationModel* model,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg);
+static void toggleKymoKnotSearchMode();
+static const char* getKymoKnotSearchModeName(PBD::KymoKnotSearchMode mode);
+static std::vector<Vector3r> getCurrentCablePoints(SimulationModel* model);
+static bool isLocalIndexInKymoKnotSegment(
+    int localIndex,
+    const PBD::KymoKnotSegment& segment);
+static bool isLocalIndexHighlighted(int localIndex);
+static bool isLocalEdgeHighlighted(int localEdgeIndex);
+static void cacheKymoKnotResult(const PBD::KymoKnotAnalysisResult& result);
+static void getHeightColor(Real y, float* color);
+
+static std::string getCableSnapshotDirectory();
+static std::string getCableSnapshotListPath();
 static std::string getCableSnapshotPath();
-static bool saveCurrentCableSnapshot();
-static bool loadCableSnapshot(std::vector<Vector3r>& ropePoints);
+static std::vector<std::string> getAvailableSnapshotPaths();
+static bool loadCableSnapshot(
+    const std::string& snapshotPath,
+    std::vector<Vector3r>& ropePoints);
 static void applyBendTwistRestStateCreep(
     SimulationModel* model,
     const RestShapeCreepConfig& creepCfg);
+static std::vector<Vector3r> generateMathematicalKnotPolyline(
+    const std::string& knotName);
+static bool writeCableSnapshotFile(
+    const std::string& snapshotPath,
+    const std::vector<Vector3r>& ropePoints);
+static void ensureCableSnapshotLibrary();
+static void printSnapshotRecognitionReport(
+    const std::string& snapshotPath,
+    const std::vector<Vector3r>& ropePoints);
+static void auditSnapshotLibrary();
+static std::string getSnapshotDisplayName(const std::string& snapshotPath);
 
 static DemoBase* base = nullptr;
 static AppConfig g_cfg;
@@ -182,11 +229,14 @@ static Vector3r g_targetA(0.0, 0.0, 0.0);
 static Vector3r g_targetB(0.0, 0.0, 0.0);
 static bool g_useSavedCableSnapshot = false;
 static unsigned int g_restCreepCounter = 0;
+static int g_snapshotCycleIndex = -1;
+static PBD::KymoKnotAnalysisResult g_lastKymoKnotResult;
+static bool g_hasKymoKnotResult = false;
+static std::string g_currentSnapshotPath;
+static PBD::KymoKnotSearchMode g_kymoKnotSearchMode = PBD::KymoKnotSearchMode::TopDown;
 
 int main(int argc, char** argv)
 {
-    std::cout << "Straight cable demo" << std::endl;
-
     base = new DemoBase();
 
     base->init(argc, argv, "Straight Cable Demo");
@@ -201,17 +251,37 @@ int main(int argc, char** argv)
     MiniGL::setClientIdleFunc(timeStep);
     MiniGL::setClientSceneFunc(render);
     MiniGL::addKeyFunc('r', reset);
-    MiniGL::addKeyFunc('o', []() {
-        if (saveCurrentCableSnapshot())
-        {
-            g_useSavedCableSnapshot = true;
-            std::cout << "Saved cable snapshot. Reset now rebuilds from saved data." << std::endl;
-        }
+    MiniGL::addKeyFunc('t', []() {
+        printTanglementMetrics(
+            Simulation::getCurrent()->getModel(),
+            g_cfg.rope,
+            g_cfg.selfCollision);
+    });
+    MiniGL::addKeyFunc('b', []() {
+        toggleKymoKnotSearchMode();
+    });
+    MiniGL::addKeyFunc('g', []() {
+        const std::vector<SelfCollisionContact> contacts =
+            detectSelfCollisionContacts(
+                Simulation::getCurrent()->getModel(),
+                g_cfg.rope,
+                g_cfg.selfCollision);
+        printSelfCollisionContacts(contacts);
+    });
+    MiniGL::addKeyFunc('u', []() {
+        const std::vector<std::string> snapshotPaths = getAvailableSnapshotPaths();
+        if (snapshotPaths.empty())
+            return;
+
+        g_snapshotCycleIndex = (g_snapshotCycleIndex + 1) %
+            static_cast<int>(snapshotPaths.size());
+        g_useSavedCableSnapshot = true;
+        reset();
     });
     MiniGL::addKeyFunc('p', []() {
         g_useSavedCableSnapshot = false;
+        g_snapshotCycleIndex = -1;
         reset();
-        std::cout << "Snapshot replay disabled. Rebuilt straight cable." << std::endl;
     });
     MiniGL::addKeyFunc('z', []() { MiniGL::move(0, 0, -0.5); });
     MiniGL::addKeyFunc('x', []() { MiniGL::move(0, 0, 0.5); });
@@ -260,16 +330,16 @@ static void buildModel()
 
     SimulationModel* model = Simulation::getCurrent()->getModel();
     std::vector<Vector3r> ropePoints;
-    if (!g_useSavedCableSnapshot || !loadCableSnapshot(ropePoints))
+    g_currentSnapshotPath.clear();
+    if (!g_useSavedCableSnapshot || !loadCableSnapshot(getCableSnapshotPath(), ropePoints))
     {
         ropePoints = generateStraightCablePolyline(g_cfg.layout, g_cfg.rope);
         if (g_useSavedCableSnapshot)
-        {
-            std::cout << "Saved cable snapshot missing or invalid. Falling back to straight cable."
-                      << std::endl;
             g_useSavedCableSnapshot = false;
-        }
     }
+
+    g_hasKymoKnotResult = false;
+    g_lastKymoKnotResult = PBD::KymoKnotAnalysisResult();
 
     addCableModel(model, ropePoints, g_cfg.rope);
 
@@ -279,10 +349,6 @@ static void buildModel()
         g_targetA = model->getParticles().getPosition(g_firstParticle);
         g_targetB = model->getParticles().getPosition(g_lastParticle);
     }
-
-    std::cout << "Built cable with "
-              << model->getParticles().getNumberOfParticles()
-              << " particles." << std::endl;
 }
 
 static std::vector<Vector3r> generateStraightCablePolyline(
@@ -315,59 +381,110 @@ static std::vector<Vector3r> generateStraightCablePolyline(
     return ropePoints;
 }
 
-static std::string getCableSnapshotPath()
+static std::string getCableSnapshotDirectory()
 {
     return Utilities::FileSystem::normalizePath(
-        base->getOutputPath() + "/saved_cable/snapshot.txt");
+        base->getOutputPath() + "/saved_cable");
 }
 
-static bool saveCurrentCableSnapshot()
+static std::string getCableSnapshotListPath()
 {
-    if (base == nullptr)
-        return false;
-
-    SimulationModel* model = Simulation::getCurrent()->getModel();
-    if (model == nullptr)
-        return false;
-
-    const ParticleData& particles = model->getParticles();
-    if (g_firstParticle >= particles.getNumberOfParticles() ||
-        g_lastParticle >= particles.getNumberOfParticles() ||
-        g_firstParticle > g_lastParticle)
-    {
-        return false;
-    }
-
-    const std::string snapshotPath = getCableSnapshotPath();
-    Utilities::FileSystem::makeDirs(Utilities::FileSystem::getFilePath(snapshotPath));
-
-    std::ofstream out(snapshotPath);
-    if (!out.is_open())
-    {
-        std::cout << "Failed to open snapshot file: " << snapshotPath << std::endl;
-        return false;
-    }
-
-    out << (g_lastParticle - g_firstParticle + 1) << "\n";
-    out << std::setprecision(17);
-    for (unsigned int i = g_firstParticle; i <= g_lastParticle; ++i)
-    {
-        const Vector3r& p = particles.getPosition(i);
-        out << p.x() << " " << p.y() << " " << p.z() << "\n";
-    }
-
-    std::cout << "Cable snapshot saved to: " << snapshotPath << std::endl;
-    return true;
+    return Utilities::FileSystem::normalizePath(
+        getCableSnapshotDirectory() + "/snapshotlist.txt");
 }
 
-static bool loadCableSnapshot(std::vector<Vector3r>& ropePoints)
+static std::string getCableSnapshotPath()
+{
+    const std::vector<std::string> snapshotPaths = getAvailableSnapshotPaths();
+    if (snapshotPaths.empty())
+        return Utilities::FileSystem::normalizePath(getCableSnapshotDirectory() + "/snapshot.txt");
+
+    int index = g_snapshotCycleIndex;
+    if (index < 0 || index >= static_cast<int>(snapshotPaths.size()))
+        index = 0;
+    return snapshotPaths[static_cast<size_t>(index)];
+}
+
+static std::vector<std::string> getAvailableSnapshotPaths()
+{
+    ensureCableSnapshotLibrary();
+
+    std::vector<std::string> snapshotPaths;
+    const std::string listPath = getCableSnapshotListPath();
+    if (Utilities::FileSystem::isFile(listPath))
+    {
+        std::ifstream in(listPath.c_str());
+        std::string line;
+        while (std::getline(in, line))
+        {
+            const std::size_t commentPos = line.find('#');
+            if (commentPos != std::string::npos)
+                line = line.substr(0, commentPos);
+
+            auto trim = [](std::string& value)
+            {
+                const std::size_t begin = value.find_first_not_of(" \t\r\n");
+                if (begin == std::string::npos)
+                {
+                    value.clear();
+                    return;
+                }
+
+                const std::size_t end = value.find_last_not_of(" \t\r\n");
+                value = value.substr(begin, end - begin + 1);
+            };
+
+            trim(line);
+            if (line.empty())
+                continue;
+
+            std::string candidate = Utilities::FileSystem::normalizePath(line);
+            if (Utilities::FileSystem::isRelativePath(candidate))
+                candidate = Utilities::FileSystem::normalizePath(getCableSnapshotDirectory() + "/" + candidate);
+
+            if (Utilities::FileSystem::isFile(candidate))
+                snapshotPaths.push_back(candidate);
+        }
+
+        if (!snapshotPaths.empty())
+            return snapshotPaths;
+    }
+
+    std::vector<std::string> fileNames;
+    const std::string snapshotDirectory = getCableSnapshotDirectory();
+
+    if (!Utilities::FileSystem::getFilesInDirectory(snapshotDirectory, fileNames))
+        return snapshotPaths;
+
+    std::sort(fileNames.begin(), fileNames.end());
+    for (const std::string& fileName : fileNames)
+    {
+        if (fileName == "." || fileName == ".." || fileName == "snapshotlist.txt")
+            continue;
+
+        if (Utilities::FileSystem::getFileExt(fileName) != "txt")
+            continue;
+
+        const std::string fullPath =
+            Utilities::FileSystem::normalizePath(snapshotDirectory + "/" + fileName);
+        if (Utilities::FileSystem::isFile(fullPath))
+            snapshotPaths.push_back(fullPath);
+    }
+
+    return snapshotPaths;
+}
+
+static bool loadCableSnapshot(
+    const std::string& snapshotPath,
+    std::vector<Vector3r>& ropePoints)
 {
     ropePoints.clear();
+    g_currentSnapshotPath.clear();
 
     if (base == nullptr)
         return false;
 
-    std::ifstream in(getCableSnapshotPath());
+    std::ifstream in(snapshotPath);
     if (!in.is_open())
         return false;
 
@@ -388,8 +505,325 @@ static bool loadCableSnapshot(std::vector<Vector3r>& ropePoints)
         }
         ropePoints.emplace_back(x, y, z);
     }
-
+    g_currentSnapshotPath = snapshotPath;
     return true;
+}
+
+static std::string getSnapshotDisplayName(const std::string& snapshotPath)
+{
+    if (snapshotPath.empty())
+        return "<none>";
+    return Utilities::FileSystem::getFileNameWithExt(snapshotPath);
+}
+
+static bool writeCableSnapshotFile(
+    const std::string& snapshotPath,
+    const std::vector<Vector3r>& ropePoints)
+{
+    std::ofstream out(snapshotPath.c_str(), std::ios::out | std::ios::trunc);
+    if (!out.is_open())
+        return false;
+
+    out << ropePoints.size() << "\n";
+    out << std::fixed << std::setprecision(9);
+    for (const Vector3r& p : ropePoints)
+        out << p.x() << " " << p.y() << " " << p.z() << "\n";
+    return true;
+}
+
+static std::vector<Vector3r> generateMathematicalKnotPolyline(
+    const std::string& knotName)
+{
+    auto sampleTrefoil = [](Real t) -> Vector3r
+    {
+        return Vector3r(
+            std::sin(t) + static_cast<Real>(2.0) * std::sin(static_cast<Real>(2.0) * t),
+            std::cos(t) - static_cast<Real>(2.0) * std::cos(static_cast<Real>(2.0) * t),
+            -std::sin(static_cast<Real>(3.0) * t));
+    };
+
+    auto sampleFigureEight = [](Real t) -> Vector3r
+    {
+        return Vector3r(
+            (static_cast<Real>(2.0) + std::cos(static_cast<Real>(2.0) * t)) * std::cos(static_cast<Real>(3.0) * t),
+            (static_cast<Real>(2.0) + std::cos(static_cast<Real>(2.0) * t)) * std::sin(static_cast<Real>(3.0) * t),
+            std::sin(static_cast<Real>(4.0) * t));
+    };
+
+    auto sampleUnknot = [](Real t) -> Vector3r
+    {
+        return Vector3r(
+            std::cos(t),
+            std::sin(t),
+            static_cast<Real>(0.15) * std::sin(static_cast<Real>(2.0) * t));
+    };
+
+    auto sampleKnot = [&](const std::string& type, Real t) -> Vector3r
+    {
+        if (type == "figure8" || type == "figure-eight" || type == "4_1")
+            return sampleFigureEight(t);
+        if (type == "unknot")
+            return sampleUnknot(t);
+        return sampleTrefoil(t);
+    };
+
+    auto buildCore = [&](const std::string& type, int samples) -> std::vector<Vector3r>
+    {
+        std::vector<Vector3r> points;
+        points.reserve(samples);
+        for (int i = 0; i < samples; ++i)
+        {
+            const Real t =
+                static_cast<Real>(2.0) * static_cast<Real>(std::acos(static_cast<Real>(-1.0))) *
+                static_cast<Real>(i) / static_cast<Real>(samples);
+            points.push_back(sampleKnot(type, t));
+        }
+
+        Vector3r center(0.0, 0.0, 0.0);
+        for (const Vector3r& p : points)
+            center += p;
+        center /= static_cast<Real>(points.size());
+
+        Real maxRadius = static_cast<Real>(0.0);
+        for (Vector3r& p : points)
+        {
+            p -= center;
+            maxRadius = std::max(maxRadius, p.norm());
+        }
+
+        if (maxRadius > static_cast<Real>(1e-12))
+        {
+            const Real scale = static_cast<Real>(3.0) / maxRadius;
+            for (Vector3r& p : points)
+                p *= scale;
+        }
+
+        return points;
+    };
+
+    auto appendOffset = [](std::vector<Vector3r>& dst, const std::vector<Vector3r>& src, const Vector3r& offset)
+    {
+        for (const Vector3r& p : src)
+            dst.push_back(p + offset);
+    };
+
+    std::vector<Vector3r> ropePoints;
+    const Real knotLift = static_cast<Real>(5.0);
+
+    if (knotName == "multi" || knotName == "double" || knotName == "mixed")
+    {
+        const std::vector<Vector3r> trefoilCore = buildCore("trefoil", 300);
+        const std::vector<Vector3r> figureEightCore = buildCore("figure8", 300);
+
+        const Vector3r trefoilOffset(static_cast<Real>(-16.0), knotLift, static_cast<Real>(0.0));
+        const Vector3r figureEightOffset(static_cast<Real>(16.0), knotLift, static_cast<Real>(0.0));
+
+        const int leadCount = 24;
+        const Real leadLength = static_cast<Real>(5.0);
+        const int spacerCount = 80;
+
+        std::vector<Vector3r> trefoilPlaced;
+        appendOffset(trefoilPlaced, trefoilCore, trefoilOffset);
+        std::vector<Vector3r> figureEightPlaced;
+        appendOffset(figureEightPlaced, figureEightCore, figureEightOffset);
+
+        const Vector3r leadStartDirection = (trefoilPlaced[1] - trefoilPlaced[0]).normalized();
+        const Vector3r bridgeStart = trefoilPlaced.back();
+        const Vector3r bridgeEnd = figureEightPlaced.front();
+        const Vector3r endDirection = (figureEightPlaced.back() - figureEightPlaced[figureEightPlaced.size() - 2]).normalized();
+
+        ropePoints.reserve(
+            trefoilPlaced.size() +
+            figureEightPlaced.size() +
+            static_cast<size_t>(leadCount) * 2 +
+            static_cast<size_t>(spacerCount));
+
+        for (int i = leadCount; i >= 1; --i)
+        {
+            const Real alpha = static_cast<Real>(i) / static_cast<Real>(leadCount);
+            ropePoints.push_back(trefoilPlaced.front() - leadStartDirection * (leadLength * alpha));
+        }
+
+        ropePoints.insert(ropePoints.end(), trefoilPlaced.begin(), trefoilPlaced.end());
+
+        for (int i = 1; i <= spacerCount; ++i)
+        {
+            const Real alpha = static_cast<Real>(i) / static_cast<Real>(spacerCount + 1);
+            ropePoints.push_back((static_cast<Real>(1.0) - alpha) * bridgeStart + alpha * bridgeEnd);
+        }
+
+        ropePoints.insert(ropePoints.end(), figureEightPlaced.begin(), figureEightPlaced.end());
+
+        for (int i = 1; i <= leadCount; ++i)
+        {
+            const Real alpha = static_cast<Real>(i) / static_cast<Real>(leadCount);
+            ropePoints.push_back(figureEightPlaced.back() + endDirection * (leadLength * alpha));
+        }
+
+        return ropePoints;
+    }
+
+    std::vector<Vector3r> corePoints = buildCore(knotName, 300);
+    for (Vector3r& p : corePoints)
+        p.y() += knotLift;
+
+    const int leadCount = 18;
+    const Real leadLength = static_cast<Real>(3.0);
+    const Vector3r startDirection =
+        (corePoints[1] - corePoints[0]).normalized();
+    const Vector3r endDirection =
+        (corePoints[corePoints.size() - 1] - corePoints[corePoints.size() - 2]).normalized();
+
+    ropePoints.reserve(corePoints.size() + 2 * static_cast<size_t>(leadCount));
+
+    for (int i = leadCount; i >= 1; --i)
+    {
+        const Real alpha = static_cast<Real>(i) / static_cast<Real>(leadCount);
+        ropePoints.push_back(corePoints.front() - startDirection * (leadLength * alpha));
+    }
+
+    ropePoints.insert(ropePoints.end(), corePoints.begin(), corePoints.end());
+
+    for (int i = 1; i <= leadCount; ++i)
+    {
+        const Real alpha = static_cast<Real>(i) / static_cast<Real>(leadCount);
+        ropePoints.push_back(corePoints.back() + endDirection * (leadLength * alpha));
+    }
+
+    return ropePoints;
+}
+
+static void ensureCableSnapshotLibrary()
+{
+    static bool initialized = false;
+    if (initialized || base == nullptr)
+        return;
+    initialized = true;
+
+    const std::string snapshotDirectory = getCableSnapshotDirectory();
+    Utilities::FileSystem::makeDirs(snapshotDirectory);
+
+    const std::vector<std::pair<std::string, std::vector<Vector3r>>> sampleSnapshots =
+    {
+        { "mathematical_trefoil.txt", generateMathematicalKnotPolyline("trefoil") },
+        { "mathematical_figure8.txt", generateMathematicalKnotPolyline("figure8") },
+        { "mathematical_multi.txt", generateMathematicalKnotPolyline("multi") }
+    };
+
+    for (const auto& sample : sampleSnapshots)
+    {
+        const std::string snapshotPath =
+            Utilities::FileSystem::normalizePath(snapshotDirectory + "/" + sample.first);
+        writeCableSnapshotFile(snapshotPath, sample.second);
+    }
+
+    std::vector<std::string> fileNames;
+    if (!Utilities::FileSystem::getFilesInDirectory(snapshotDirectory, fileNames))
+        return;
+
+    std::sort(fileNames.begin(), fileNames.end());
+
+    std::vector<std::string> orderedNames;
+    orderedNames.reserve(fileNames.size());
+
+    const std::vector<std::string> preferredOrder =
+    {
+        "mathematical_trefoil.txt",
+        "mathematical_figure8.txt",
+        "mathematical_multi.txt"
+    };
+
+    for (const std::string& preferred : preferredOrder)
+    {
+        if (std::find(fileNames.begin(), fileNames.end(), preferred) != fileNames.end())
+            orderedNames.push_back(preferred);
+    }
+
+    for (const std::string& fileName : fileNames)
+    {
+        if (fileName == "." || fileName == ".." || fileName == "snapshotlist.txt")
+            continue;
+        if (Utilities::FileSystem::getFileExt(fileName) != "txt")
+            continue;
+        if (std::find(orderedNames.begin(), orderedNames.end(), fileName) != orderedNames.end())
+            continue;
+        orderedNames.push_back(fileName);
+    }
+
+    std::ofstream listOut(getCableSnapshotListPath().c_str(), std::ios::out | std::ios::trunc);
+    if (!listOut.is_open())
+        return;
+
+    listOut << "# Snapshot list used by the MyCableDemo snapshot cycler.\n";
+    listOut << "# The first entries are synthetic mathematical knots.\n";
+    for (const std::string& fileName : orderedNames)
+        listOut << fileName << "\n";
+}
+
+static void printSnapshotRecognitionReport(
+    const std::string& snapshotPath,
+    const std::vector<Vector3r>& ropePoints)
+{
+    const std::string bridgeRoot =
+        (base != nullptr)
+            ? Utilities::FileSystem::normalizePath(base->getOutputPath() + "/kymoknot_bridge")
+            : "kymoknot_bridge";
+    const PBD::KymoKnotAnalysisResult knotResult =
+        PBD::KymoKnotAnalyzer::analyzeLinear(
+            ropePoints,
+            bridgeRoot,
+            g_kymoKnotSearchMode);
+
+    std::cout << "Snapshot " << getSnapshotDisplayName(snapshotPath) << ": ";
+    if (!knotResult.available)
+    {
+        g_hasKymoKnotResult = false;
+        std::cout << knotResult.message << std::endl;
+        return;
+    }
+
+    cacheKymoKnotResult(knotResult);
+    std::cout << (knotResult.success ? "recognized" : "not recognized") << std::endl;
+    if (!knotResult.success)
+    {
+        std::cout << "  KymoKnot: " << knotResult.message << std::endl;
+        return;
+    }
+
+    for (size_t i = 0; i < knotResult.segments.size(); ++i)
+    {
+        const PBD::KymoKnotSegment& segment = knotResult.segments[i];
+        std::cout << "  [" << i << "] "
+                  << segment.knotType
+                  << " start=" << segment.start
+                  << " end=" << segment.end
+                  << " length=" << segment.length
+                  << std::endl;
+    }
+}
+
+static void auditSnapshotLibrary()
+{
+    const std::vector<std::string> snapshotPaths = getAvailableSnapshotPaths();
+    if (snapshotPaths.empty())
+    {
+        std::cout << "Snapshot audit: no snapshot files found." << std::endl;
+        return;
+    }
+
+    std::cout << "Snapshot audit:" << std::endl;
+    for (const std::string& snapshotPath : snapshotPaths)
+    {
+        std::vector<Vector3r> ropePoints;
+        if (!loadCableSnapshot(snapshotPath, ropePoints))
+        {
+            std::cout << "  " << getSnapshotDisplayName(snapshotPath)
+                      << ": failed to load" << std::endl;
+            continue;
+        }
+
+        printSnapshotRecognitionReport(snapshotPath, ropePoints);
+    }
 }
 
 static void applyBendTwistRestStateCreep(
@@ -808,6 +1242,268 @@ collectSelfCollisionCandidatesSpatialHash(
     return pairs;
 }
 
+static std::vector<SelfCollisionContact> detectSelfCollisionContacts(
+    SimulationModel* model,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg)
+{
+    std::vector<SelfCollisionContact> contacts;
+    if (model == nullptr)
+        return contacts;
+
+    ParticleData& pd = model->getParticles();
+    const unsigned int n = pd.getNumberOfParticles();
+    if (n < 4)
+        return contacts;
+
+    const Real minDist = static_cast<Real>(2.0) * collisionCfg.ropeRadius;
+    const Real eps = static_cast<Real>(1e-8);
+    const std::vector<std::pair<unsigned int, unsigned int>> candidates =
+        collectSelfCollisionCandidatesSpatialHash(
+            pd,
+            minDist,
+            collisionCfg.hashCellSize);
+
+    contacts.reserve(candidates.size());
+    for (const auto& pair : candidates)
+    {
+        const unsigned int i = pair.first;
+        const unsigned int j = pair.second;
+
+        const Real arcDist = static_cast<Real>(std::abs((int)j - (int)i)) * ropeCfg.dx;
+        if (arcDist < collisionCfg.excludeArcLength)
+            continue;
+
+        const Vector3r p0 = pd.getPosition(i);
+        const Vector3r p1 = pd.getPosition(i + 1);
+        const Vector3r q0 = pd.getPosition(j);
+        const Vector3r q1 = pd.getPosition(j + 1);
+
+        Real s, t;
+        Vector3r c1, c2;
+        closestPtSegmentSegment(p0, p1, q0, q1, s, t, c1, c2);
+
+        const Vector3r delta = c2 - c1;
+        const Real dist = delta.norm();
+        if (dist - minDist < static_cast<Real>(0.0) || dist <= eps)
+            contacts.push_back({ i, j });
+    }
+
+    return contacts;
+}
+
+static unsigned int countSelfCollisionContactClusters(
+    const std::vector<SelfCollisionContact>& contacts)
+{
+    const size_t n = contacts.size();
+    if (n == 0)
+        return 0;
+
+    std::vector<unsigned char> visited(n, 0);
+    unsigned int clusterCount = 0;
+
+    auto contactsShareEdge = [](const SelfCollisionContact& a, const SelfCollisionContact& b)
+    {
+        return a.edgeA == b.edgeA ||
+               a.edgeA == b.edgeB ||
+               a.edgeB == b.edgeA ||
+               a.edgeB == b.edgeB;
+    };
+
+    for (size_t start = 0; start < n; ++start)
+    {
+        if (visited[start] != 0)
+            continue;
+
+        clusterCount++;
+        std::vector<size_t> stack(1, start);
+        visited[start] = 1;
+
+        while (!stack.empty())
+        {
+            const size_t current = stack.back();
+            stack.pop_back();
+
+            for (size_t next = 0; next < n; ++next)
+            {
+                if (visited[next] != 0)
+                    continue;
+                if (!contactsShareEdge(contacts[current], contacts[next]))
+                    continue;
+
+                visited[next] = 1;
+                stack.push_back(next);
+            }
+        }
+    }
+
+    return clusterCount;
+}
+
+static void printSelfCollisionContacts(
+    const std::vector<SelfCollisionContact>& contacts)
+{
+    std::cout << "Self-collision contacts (" << contacts.size() << "):";
+    if (contacts.empty())
+    {
+        std::cout << " none" << std::endl;
+        return;
+    }
+
+    std::cout << std::endl;
+    for (const SelfCollisionContact& contact : contacts)
+    {
+        std::cout << "  (" << contact.edgeA << ", " << contact.edgeB << ")"
+                  << std::endl;
+    }
+}
+
+static std::vector<Vector3r> getCurrentCablePoints(SimulationModel* model)
+{
+    std::vector<Vector3r> points;
+    if (model == nullptr || g_lastParticle < g_firstParticle)
+        return points;
+
+    ParticleData& particles = model->getParticles();
+    const unsigned int count = g_lastParticle - g_firstParticle + 1;
+    points.reserve(count);
+    for (unsigned int i = 0; i < count; ++i)
+        points.push_back(particles.getPosition(g_firstParticle + i));
+
+    return points;
+}
+
+static bool isLocalIndexInKymoKnotSegment(
+    int localIndex,
+    const PBD::KymoKnotSegment& segment)
+{
+    if (localIndex < 0 || segment.start < 0 || segment.end < 0)
+        return false;
+
+    if (segment.start <= segment.end)
+        return localIndex >= segment.start && localIndex <= segment.end;
+
+    return localIndex >= segment.start || localIndex <= segment.end;
+}
+
+static bool isLocalIndexHighlighted(int localIndex)
+{
+    if (!g_hasKymoKnotResult)
+        return false;
+
+    for (const PBD::KymoKnotSegment& segment : g_lastKymoKnotResult.segments)
+    {
+        if (isLocalIndexInKymoKnotSegment(localIndex, segment))
+            return true;
+    }
+    return false;
+}
+
+static bool isLocalEdgeHighlighted(int localEdgeIndex)
+{
+    return isLocalIndexHighlighted(localEdgeIndex) ||
+           isLocalIndexHighlighted(localEdgeIndex + 1);
+}
+
+static void cacheKymoKnotResult(const PBD::KymoKnotAnalysisResult& result)
+{
+    g_lastKymoKnotResult = result;
+    g_hasKymoKnotResult = result.available && !result.segments.empty();
+}
+
+static const char* getKymoKnotSearchModeName(PBD::KymoKnotSearchMode mode)
+{
+    return (mode == PBD::KymoKnotSearchMode::BottomUp) ? "bottom-up" : "top-down";
+}
+
+static void toggleKymoKnotSearchMode()
+{
+    g_kymoKnotSearchMode =
+        (g_kymoKnotSearchMode == PBD::KymoKnotSearchMode::TopDown)
+            ? PBD::KymoKnotSearchMode::BottomUp
+            : PBD::KymoKnotSearchMode::TopDown;
+
+    std::cout << "KymoKnot search mode: "
+              << getKymoKnotSearchModeName(g_kymoKnotSearchMode)
+              << std::endl;
+}
+
+static void printTanglementMetrics(
+    SimulationModel* model,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg)
+{
+    const std::vector<SelfCollisionContact> contacts =
+        detectSelfCollisionContacts(model, ropeCfg, collisionCfg);
+    const unsigned int clusterCount = countSelfCollisionContactClusters(contacts);
+
+    std::cout << "Tanglement metrics:"
+              << " self-collisions=" << contacts.size()
+              << ", collision-blobs=" << clusterCount
+              << std::endl;
+
+    const std::vector<Vector3r> cablePoints = getCurrentCablePoints(model);
+    const std::string bridgeRoot =
+        (base != nullptr)
+            ? Utilities::FileSystem::normalizePath(base->getOutputPath() + "/kymoknot_bridge")
+            : "kymoknot_bridge";
+    const PBD::KymoKnotAnalysisResult knotResult =
+        PBD::KymoKnotAnalyzer::analyzeLinear(
+            cablePoints,
+            bridgeRoot,
+            g_kymoKnotSearchMode);
+
+    if (!knotResult.available)
+    {
+        g_hasKymoKnotResult = false;
+        std::cout << "KymoKnot: " << knotResult.message << std::endl;
+        return;
+    }
+
+    cacheKymoKnotResult(knotResult);
+    std::cout << "KymoKnot segments: " << knotResult.segments.size() << std::endl;
+    for (size_t i = 0; i < knotResult.segments.size(); ++i)
+    {
+        const PBD::KymoKnotSegment& segment = knotResult.segments[i];
+        std::cout << "  [" << i << "] "
+                  << segment.knotType
+                  << " start=" << segment.start
+                  << " end=" << segment.end
+                  << " length=" << segment.length
+                  << std::endl;
+    }
+}
+
+static void getHeightColor(Real y, float* color)
+{
+    const Real minY = g_cfg.groundY - static_cast<Real>(0.25);
+    const Real maxY = std::max(
+        g_cfg.layout.height + static_cast<Real>(2.0),
+        g_cfg.groundY + static_cast<Real>(1.0));
+    const Real t = clamp01((y - minY) / std::max(maxY - minY, static_cast<Real>(1e-6)));
+
+    const Vector3r low(0.08, 0.35, 0.85);
+    const Vector3r mid(0.15, 0.75, 0.55);
+    const Vector3r high(0.95, 0.72, 0.12);
+
+    Vector3r rgb;
+    if (t < static_cast<Real>(0.5))
+    {
+        const Real localT = static_cast<Real>(2.0) * t;
+        rgb = (static_cast<Real>(1.0) - localT) * low + localT * mid;
+    }
+    else
+    {
+        const Real localT = static_cast<Real>(2.0) * (t - static_cast<Real>(0.5));
+        rgb = (static_cast<Real>(1.0) - localT) * mid + localT * high;
+    }
+
+    color[0] = static_cast<float>(rgb.x());
+    color[1] = static_cast<float>(rgb.y());
+    color[2] = static_cast<float>(rgb.z());
+    color[3] = 1.0f;
+}
+
 static uint64_t makeOrderedEdgePairKey(unsigned int a, unsigned int b)
 {
     const uint64_t lo = std::min<uint64_t>(a, b);
@@ -1024,9 +1720,11 @@ static void render()
     SimulationModel* model = Simulation::getCurrent()->getModel();
     const ParticleData& particles = model->getParticles();
 
-    float blue[4] = {0.0f, 0.0f, 0.8f, 1.0f};
     float yellow[4] = {1.0f, 0.9f, 0.1f, 1.0f};
     float magenta[4] = {0.9f, 0.1f, 0.9f, 1.0f};
+    float segmentColor[4] = {0.0f, 0.0f, 0.8f, 1.0f};
+    float knotColor[4] = {0.98f, 0.25f, 0.18f, 1.0f};
+    float knotSphereColor[4] = {1.0f, 0.45f, 0.20f, 1.0f};
 
     // Render the rod centerline as spheres plus cylinders.
     for (unsigned int m = 0; m < model->getLineModels().size(); ++m)
@@ -1041,12 +1739,23 @@ static void render()
 
             const Vector3r& p0 = particles.getPosition(i0);
             const Vector3r& p1 = particles.getPosition(i1);
+            const Real avgY = static_cast<Real>(0.5) * (p0.y() + p1.y());
+            getHeightColor(avgY, segmentColor);
 
-            MiniGL::drawSphere(p0, 0.03f, blue);
+            const int localEdgeIndex =
+                static_cast<int>(i0) - static_cast<int>(g_firstParticle);
+            const bool highlightKnot = isLocalEdgeHighlighted(localEdgeIndex);
+            const float* activeColor = highlightKnot ? knotColor : segmentColor;
+
+            MiniGL::drawSphere(p0, 0.03f, highlightKnot ? knotSphereColor : segmentColor);
             if (e == lineModel->getEdges().size() - 1)
-                MiniGL::drawSphere(p1, 0.03f, blue);
+                MiniGL::drawSphere(p1, 0.03f, isLocalIndexHighlighted(static_cast<int>(i1) - static_cast<int>(g_firstParticle)) ? knotSphereColor : segmentColor);
 
-            MiniGL::drawCylinder(p0, p1, blue, static_cast<float>(g_cfg.rope.renderRadius));
+            MiniGL::drawCylinder(
+                p0,
+                p1,
+                activeColor,
+                static_cast<float>(g_cfg.rope.renderRadius));
         }
     }
 
