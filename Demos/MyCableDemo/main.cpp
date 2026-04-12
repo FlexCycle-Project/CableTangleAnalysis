@@ -6,8 +6,10 @@
 #include "Demos/Common/DemoBase.h"
 #include "Simulation/Simulation.h"
 #include "Utils/FileSystem.h"
+#include "CablePhysics.h"
 #include "KymoKnotAnalyzer.h"
 
+#include <GLFW/glfw3.h>
 #include <Eigen/Dense>
 #include <iostream>
 #include <vector>
@@ -16,8 +18,6 @@
 #include <fstream>
 #include <iomanip>
 #include <random>
-#include <unordered_map>
-#include <unordered_set>
 #include <cstdint>
 #include <limits>
 #include <sstream>
@@ -31,128 +31,13 @@ using namespace PBD;
 using namespace Eigen;
 using namespace std;
 
-// Rod material, discretization, and rendering settings.
-struct RopeConfig
-{
-    Real stretchStiffness = static_cast<Real>(1.0);
-    Real shearStiffnessX = static_cast<Real>(1.0);
-    Real shearStiffnessY = static_cast<Real>(1.0);
-    Real bendStiffnessX = static_cast<Real>(0.005);
-    Real bendStiffnessY = static_cast<Real>(0.005);
-    Real twistStiffness = static_cast<Real>(0.02);
-    Real dx = static_cast<Real>(0.1);
-    Real renderRadius = static_cast<Real>(0.06);
-};
-
-// Per-step simulation controls and endpoint pulling.
-struct PhysicsConfig
-{
-    Real timeStep = static_cast<Real>(0.005);
-    Real pullSpring = static_cast<Real>(1000.0);
-    Real pullDamping = static_cast<Real>(2.0);
-    Real pullMaxAccel = static_cast<Real>(1000.0);
-    Real targetStep = static_cast<Real>(0.05);
-    Real velocityRecomputeBlend = static_cast<Real>(0.05);
-};
-
-// Slow bend/twist rest-state creep makes the rod behave more like a cable.
-struct RestShapeCreepConfig
-{
-    bool enabled = true;
-    unsigned int stepInterval = 20;
-    Real creep = static_cast<Real>(0.01);
-    Real activationThreshold = static_cast<Real>(1e-4);
-};
-
-// Endpoints for the base cable layout.
-struct CableLayoutConfig
-{
-    Real endpointX = static_cast<Real>(10.0);
-    Real height = static_cast<Real>(6.0);
-};
-
-// Randomized control-walk settings for the mess generator.
-struct RandomCableConfig
-{
-    bool enabled = true;
-    unsigned int seed = 0;
-    int controlPointCount = 30;
-    Real controlStepLength = static_cast<Real>(1.5);
-    Real straightChance = static_cast<Real>(0);
-    Real leftChance = static_cast<Real>(0.5);
-    Real rightChance = static_cast<Real>(0.5);
-    Real centerPull = static_cast<Real>(0.15);
-    Real maxLateralOffset = static_cast<Real>(4.5);
-    int smoothingIterations = 1;
-    Real smoothingAlpha = static_cast<Real>(0.08);
-    Real minHeightAboveGround = static_cast<Real>(5.0);
-};
-
-// Tuning for the custom rope self-collision pass.
-struct SelfCollisionConfig
-{
-    bool enabled = true;
-    Real ropeRadius = static_cast<Real>(0.08);
-    Real compliance = static_cast<Real>(1e-10);
-    unsigned int iterations = 6;
-    Real excludeArcLength = static_cast<Real>(0.9);
-    Real normalDamping = static_cast<Real>(0.2);
-    Real tangentialDamping = static_cast<Real>(0.08);
-    Real maxCorrection = static_cast<Real>(0.05);
-    Real hashCellSize = static_cast<Real>(0.2);
-};
-
-// Single source of truth for the demo.
-struct AppConfig
-{
-    RopeConfig rope;
-    PhysicsConfig physics;
-    RestShapeCreepConfig restCreep;
-    CableLayoutConfig layout;
-    RandomCableConfig randomCable;
-    Real groundY = static_cast<Real>(0.0);
-    SelfCollisionConfig selfCollision;
-};
-
-// Integer grid coordinate for the self-collision spatial hash.
-struct Int3
-{
-    int x, y, z;
-
-    bool operator==(const Int3& other) const
-    {
-        return x == other.x && y == other.y && z == other.z;
-    }
-};
-
-struct Int3Hash
-{
-    std::size_t operator()(const Int3& c) const
-    {
-        const std::size_t h1 = std::hash<int>()(c.x);
-        const std::size_t h2 = std::hash<int>()(c.y);
-        const std::size_t h3 = std::hash<int>()(c.z);
-        return h1 ^ (h2 * 73856093u) ^ (h3 * 19349663u);
-    }
-};
-
-// Velocity-side damping data saved during self-collision resolution.
-struct VelocityPairCorrection
-{
-    unsigned int i0, i1, j0, j1;
-    Real wP0, wP1, wQ0, wQ1;
-    Vector3r nrm;
-};
-
-struct SelfCollisionContact
-{
-    unsigned int edgeA;
-    unsigned int edgeB;
-};
+extern "C" void glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);
 
 static void buildModel();
 static void reset();
 static void regenerateRandomCable();
+static void togglePullForces();
+static void adjustPullStrength(Real scale);
 static void timeStep();
 static void render();
 
@@ -176,59 +61,54 @@ static void addCableModel(
     SimulationModel* model,
     std::vector<Vector3r>& ropePoints,
     const RopeConfig& ropeCfg);
-
-static void applyGroundConstraint(Real groundY);
-static void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig& physicsCfg);
-static void applySelfCollisionXPBD(
+static void addCableModel(
     SimulationModel* model,
-    Real dt,
+    std::vector<Vector3r>& ropePoints,
     const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg);
-
-static Real clamp01(Real x);
-static Real getInverseMass(const ParticleData& pd, unsigned int index);
-static Vector3r clampVec(const Vector3r& v, Real maxNorm);
-static uint64_t makeOrderedEdgePairKey(unsigned int a, unsigned int b);
-
-static void closestPtSegmentSegment(
-    const Vector3r& p1, const Vector3r& q1,
-    const Vector3r& p2, const Vector3r& q2,
-    Real& s, Real& t,
-    Vector3r& c1, Vector3r& c2);
-
-static void recomputeVelocitiesFromPositions(
+    std::pair<unsigned int, unsigned int>* particleRangeOut);
+static void initializeCablePieces();
+static void rebuildCableFromPieces(
     SimulationModel* model,
-    const std::vector<Vector3r>& oldPositions,
-    Real dt,
-    Real blend);
+    const std::vector<std::vector<Vector3r>>& ropePieces);
+static std::vector<std::vector<Vector3r>> collectCurrentCablePieces(
+    SimulationModel* model);
+static bool splitCablePieceAtEdge(
+    std::vector<std::vector<Vector3r>>& ropePieces,
+    size_t pieceIndex,
+    size_t edgeIndex);
+static bool buildPickRay(
+    const ::Vector2i& screenPos,
+    Vector3r& rayStart,
+    Vector3r& rayEnd);
+static bool selectCableEdgeAtScreenPosition(
+    const ::Vector2i& screenPos,
+    size_t& outPieceIndex,
+    size_t& outEdgeIndex,
+    Real& outRayDepthT,
+    Real& outEdgeT,
+    Vector3r& outGrabbedPoint);
+static bool beginMouseDragAtScreenPosition(const ::Vector2i& screenPos);
+static void updateMouseDragTargetAtScreenPosition(const ::Vector2i& screenPos);
+static void applyMouseDragForces(SimulationModel* model, Real dt);
+static bool cutSelectedCableSegment();
+static void endMouseDrag();
+static bool handleMousePress(int button, int action, int mods);
+static bool handleMouseMove(int x, int y);
 
-static std::vector<std::pair<unsigned int, unsigned int>>
-collectSelfCollisionCandidatesSpatialHash(
-    const ParticleData& particles,
-    Real inflate,
-    Real cellSize);
-
-static std::vector<SelfCollisionContact> detectSelfCollisionContacts(
-    SimulationModel* model,
-    const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg);
-static unsigned int countSelfCollisionContactClusters(
-    const std::vector<SelfCollisionContact>& contacts);
-static void printSelfCollisionContacts(
-    const std::vector<SelfCollisionContact>& contacts);
 static void printTanglementMetrics(
     SimulationModel* model,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg);
 static void toggleKymoKnotSearchMode();
 static const char* getKymoKnotSearchModeName(PBD::KymoKnotSearchMode mode);
-static std::vector<Vector3r> getCurrentCablePoints(SimulationModel* model);
 static bool isLocalIndexInKymoKnotSegment(
     int localIndex,
     const PBD::KymoKnotSegment& segment);
-static bool isLocalIndexHighlighted(int localIndex);
-static bool isLocalEdgeHighlighted(int localEdgeIndex);
+static bool isLocalIndexHighlighted(size_t pieceIndex, int localIndex);
+static bool isLocalEdgeHighlighted(size_t pieceIndex, int localEdgeIndex);
 static void cacheKymoKnotResult(const PBD::KymoKnotAnalysisResult& result);
+static void cacheCableKymoKnotResults(
+    const std::vector<PBD::KymoKnotAnalysisResult>& results);
 static void getHeightColor(Real y, float* color);
 
 static std::string getCableSnapshotDirectory();
@@ -238,9 +118,6 @@ static std::vector<std::string> getAvailableSnapshotPaths();
 static bool loadCableSnapshot(
     const std::string& snapshotPath,
     std::vector<Vector3r>& ropePoints);
-static void applyBendTwistRestStateCreep(
-    SimulationModel* model,
-    const RestShapeCreepConfig& creepCfg);
 static std::vector<Vector3r> generateMathematicalKnotPolyline(
     const std::string& knotName);
 static bool writeCableSnapshotFile(
@@ -257,15 +134,35 @@ static DemoBase* base = nullptr;
 static AppConfig g_cfg;
 static unsigned int g_firstParticle = 0;
 static unsigned int g_lastParticle = 0;
-static Vector3r g_targetA(0.0, 0.0, 0.0);
-static Vector3r g_targetB(0.0, 0.0, 0.0);
 static bool g_useSavedCableSnapshot = false;
-static unsigned int g_restCreepCounter = 0;
+unsigned int g_restCreepCounter = 0;
 static int g_snapshotCycleIndex = -1;
 static PBD::KymoKnotAnalysisResult g_lastKymoKnotResult;
 static bool g_hasKymoKnotResult = false;
+static std::vector<PBD::KymoKnotAnalysisResult> g_cachedCableKymoKnotResults;
+static bool g_hasCableKymoKnotResults = false;
 static std::string g_currentSnapshotPath;
 static PBD::KymoKnotSearchMode g_kymoKnotSearchMode = PBD::KymoKnotSearchMode::TopDown;
+static std::vector<std::vector<Vector3r>> g_cablePieces;
+std::vector<std::pair<unsigned int, unsigned int>> g_cablePieceRanges;
+bool g_pullEnabled = false;
+
+struct MouseDragState
+{
+    bool selected = false;
+    bool active = false;
+    size_t pieceIndex = std::numeric_limits<size_t>::max();
+    size_t edgeIndex = std::numeric_limits<size_t>::max();
+    Real edgeT = static_cast<Real>(0.0);
+    Real rayDepthT = static_cast<Real>(0.0);
+    Vector3r grabbedPoint = Vector3r::Zero();
+    Vector3r targetPoint = Vector3r::Zero();
+};
+
+static MouseDragState g_mouseDrag;
+static const Real g_mouseDragSpring = static_cast<Real>(1800.0);
+static const Real g_mouseDragDamping = static_cast<Real>(24.0);
+static const Real g_mouseDragMaxAccel = static_cast<Real>(3000.0);
 
 int main(int argc, char** argv)
 {
@@ -282,6 +179,8 @@ int main(int argc, char** argv)
     // Keyboard input for this demo lives here.
     MiniGL::setClientIdleFunc(timeStep);
     MiniGL::setClientSceneFunc(render);
+    MiniGL::addMousePressFunc(handleMousePress);
+    MiniGL::addMouseMoveFunc(handleMouseMove);
     MiniGL::addKeyFunc('r', reset);
     MiniGL::addKeyFunc('t', []() {
         printTanglementMetrics(
@@ -292,13 +191,9 @@ int main(int argc, char** argv)
     MiniGL::addKeyFunc('b', []() {
         toggleKymoKnotSearchMode();
     });
-    MiniGL::addKeyFunc('g', []() {
-        const std::vector<SelfCollisionContact> contacts =
-            detectSelfCollisionContacts(
-                Simulation::getCurrent()->getModel(),
-                g_cfg.rope,
-                g_cfg.selfCollision);
-        printSelfCollisionContacts(contacts);
+    MiniGL::addKeyFunc('c', []() {
+        if (!cutSelectedCableSegment())
+            std::cout << "No selected cable segment to cut" << std::endl;
     });
     MiniGL::addKeyFunc('u', []() {
         const std::vector<std::string> snapshotPaths = getAvailableSnapshotPaths();
@@ -308,34 +203,30 @@ int main(int argc, char** argv)
         g_snapshotCycleIndex = (g_snapshotCycleIndex + 1) %
             static_cast<int>(snapshotPaths.size());
         g_useSavedCableSnapshot = true;
+        g_cablePieces.clear();
         reset();
     });
     MiniGL::addKeyFunc('p', []() {
         g_useSavedCableSnapshot = false;
         g_snapshotCycleIndex = -1;
+        g_cablePieces.clear();
         reset();
     });
     MiniGL::addKeyFunc('o', []() {
+        g_cablePieces.clear();
         regenerateRandomCable();
     });
-    MiniGL::addKeyFunc('z', []() { MiniGL::move(0, 0, -0.5); });
-    MiniGL::addKeyFunc('x', []() { MiniGL::move(0, 0, 0.5); });
-
-    // E/D/F/S/C/V now move the magenta target.
-    MiniGL::addKeyFunc('e', []() { g_targetB.z() += g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('d', []() { g_targetB.z() -= g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('f', []() { g_targetB.x() -= g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('s', []() { g_targetB.x() += g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('c', []() { g_targetB.y() -= g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('v', []() { g_targetB.y() += g_cfg.physics.targetStep; });
-
-    // I/K/L/J/N/M now move the yellow target.
-    MiniGL::addKeyFunc('i', []() { g_targetA.z() += g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('k', []() { g_targetA.z() -= g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('l', []() { g_targetA.x() -= g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('j', []() { g_targetA.x() += g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('n', []() { g_targetA.y() -= g_cfg.physics.targetStep; });
-    MiniGL::addKeyFunc('m', []() { g_targetA.y() += g_cfg.physics.targetStep; });
+    MiniGL::addKeyFunc('*', []() {
+        togglePullForces();
+    });
+    MiniGL::addKeyFunc('-', []() {
+        adjustPullStrength(static_cast<Real>(0.85));
+    });
+    MiniGL::addKeyFunc('+', []() {
+        adjustPullStrength(static_cast<Real>(1.15));
+    });
+    MiniGL::addKeyFunc('z', []() { MiniGL::move(0, 0, -1); });
+    MiniGL::addKeyFunc('x', []() { MiniGL::move(0, 0, 1); });
 
     MiniGL::setViewport(
         40.0f, 0.1f, 500.0f,
@@ -352,6 +243,10 @@ int main(int argc, char** argv)
 
 static void reset()
 {
+    g_mouseDrag = MouseDragState();
+    g_cachedCableKymoKnotResults.clear();
+    g_hasCableKymoKnotResults = false;
+    g_cablePieces.clear();
     Simulation::getCurrent()->reset();
     base->getSelectedParticles().clear();
 
@@ -361,9 +256,11 @@ static void reset()
 
 static void regenerateRandomCable()
 {
+    g_mouseDrag = MouseDragState();
     g_useSavedCableSnapshot = false;
     g_snapshotCycleIndex = -1;
     g_cfg.randomCable.enabled = true;
+    g_cablePieces.clear();
 
     std::random_device rd;
     unsigned int newSeed = rd();
@@ -375,42 +272,433 @@ static void regenerateRandomCable()
     reset();
 }
 
+static void togglePullForces()
+{
+    g_pullEnabled = !g_pullEnabled;
+    std::cout << "End pull force: " << (g_pullEnabled ? "on" : "off") << std::endl;
+}
+
+static void adjustPullStrength(Real scale)
+{
+    g_cfg.physics.pullSpring = std::max(
+        static_cast<Real>(0.0),
+        g_cfg.physics.pullSpring * scale);
+    std::cout << "End pull strength: " << g_cfg.physics.pullSpring << std::endl;
+}
+
+static void initializeCablePieces()
+{
+    g_cablePieces.clear();
+
+    std::vector<Vector3r> ropePoints;
+    if (g_useSavedCableSnapshot && loadCableSnapshot(getCableSnapshotPath(), ropePoints))
+    {
+        g_cablePieces.push_back(std::move(ropePoints));
+        return;
+    }
+
+    if (g_cfg.randomCable.enabled)
+    {
+        ropePoints = generateRandomCableMessPolyline(
+            g_cfg.layout,
+            g_cfg.rope,
+            g_cfg.randomCable,
+            g_cfg.groundY);
+    }
+    else
+    {
+        ropePoints = generateStraightCablePolyline(g_cfg.layout, g_cfg.rope);
+    }
+
+    g_cablePieces.push_back(std::move(ropePoints));
+}
+
+static void rebuildCableFromPieces(
+    SimulationModel* model,
+    const std::vector<std::vector<Vector3r>>& ropePieces)
+{
+    if (model == nullptr)
+        return;
+
+    g_cablePieceRanges.clear();
+    g_firstParticle = 0;
+    g_lastParticle = 0;
+
+    for (const std::vector<Vector3r>& piece : ropePieces)
+    {
+        if (piece.size() < 2)
+            continue;
+
+        std::vector<Vector3r> copy = piece;
+        std::pair<unsigned int, unsigned int> range(0, 0);
+        addCableModel(model, copy, g_cfg.rope, &range);
+        g_cablePieceRanges.push_back(range);
+    }
+
+    if (!g_cablePieceRanges.empty())
+    {
+        g_firstParticle = g_cablePieceRanges.front().first;
+        g_lastParticle = g_cablePieceRanges.back().second;
+    }
+}
+
+static std::vector<std::vector<Vector3r>> collectCurrentCablePieces(
+    SimulationModel* model)
+{
+    std::vector<std::vector<Vector3r>> ropePieces;
+    if (model == nullptr)
+        return ropePieces;
+
+    const ParticleData& particles = model->getParticles();
+    for (LineModel* lineModel : model->getLineModels())
+    {
+        if (lineModel == nullptr)
+            continue;
+
+        const LineModel::Edges& edges = lineModel->getEdges();
+        if (edges.empty())
+            continue;
+
+        const unsigned int pointOffset = lineModel->getIndexOffset();
+        const unsigned int pointCount = static_cast<unsigned int>(edges.size()) + 1u;
+        if (pointOffset + pointCount > particles.getNumberOfParticles())
+            continue;
+
+        std::vector<Vector3r> piece;
+        piece.reserve(pointCount);
+        for (unsigned int i = 0; i < pointCount; ++i)
+            piece.push_back(particles.getPosition(pointOffset + i));
+        ropePieces.push_back(std::move(piece));
+    }
+
+    return ropePieces;
+}
+
+static bool splitCablePieceAtEdge(
+    std::vector<std::vector<Vector3r>>& ropePieces,
+    size_t pieceIndex,
+    size_t edgeIndex)
+{
+    if (pieceIndex >= ropePieces.size())
+        return false;
+
+    std::vector<Vector3r>& piece = ropePieces[pieceIndex];
+    if (piece.size() < 3 || edgeIndex + 1 >= piece.size())
+        return false;
+
+    std::vector<Vector3r> left(
+        piece.begin(),
+        piece.begin() + static_cast<std::ptrdiff_t>(edgeIndex + 1));
+    std::vector<Vector3r> right(
+        piece.begin() + static_cast<std::ptrdiff_t>(edgeIndex + 1),
+        piece.end());
+    if (left.size() < 2 || right.size() < 2)
+        return false;
+
+    piece = std::move(left);
+    ropePieces.insert(
+        ropePieces.begin() + static_cast<std::ptrdiff_t>(pieceIndex + 1),
+        std::move(right));
+    return true;
+}
+
+static bool buildPickRay(
+    const ::Vector2i& screenPos,
+    Vector3r& rayStart,
+    Vector3r& rayEnd)
+{
+    GLint viewport[4];
+    GLdouble mv[16];
+    GLdouble pm[16];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    glGetDoublev(GL_MODELVIEW_MATRIX, mv);
+    glGetDoublev(GL_PROJECTION_MATRIX, pm);
+
+    Matrix4r modelView;
+    Matrix4r projection;
+    for (int c = 0; c < 4; ++c)
+    {
+        for (int r = 0; r < 4; ++r)
+        {
+            modelView(r, c) = static_cast<Real>(mv[c * 4 + r]);
+            projection(r, c) = static_cast<Real>(pm[c * 4 + r]);
+        }
+    }
+
+    const Matrix4r invMVP = (projection * modelView).inverse();
+    const Real x = (static_cast<Real>(screenPos[0] - viewport[0]) /
+        static_cast<Real>(std::max(1, viewport[2])) * static_cast<Real>(2.0)) - static_cast<Real>(1.0);
+    const Real y = (static_cast<Real>(viewport[3] - screenPos[1] - viewport[1]) /
+        static_cast<Real>(std::max(1, viewport[3])) * static_cast<Real>(2.0)) - static_cast<Real>(1.0);
+
+    const Vector4r nearClip(x, y, static_cast<Real>(-1.0), static_cast<Real>(1.0));
+    const Vector4r farClip(x, y, static_cast<Real>(1.0), static_cast<Real>(1.0));
+    Vector4r nearWorld = invMVP * nearClip;
+    Vector4r farWorld = invMVP * farClip;
+
+    if (std::abs(nearWorld.w()) < static_cast<Real>(1e-8) ||
+        std::abs(farWorld.w()) < static_cast<Real>(1e-8))
+    {
+        return false;
+    }
+
+    nearWorld /= nearWorld.w();
+    farWorld /= farWorld.w();
+    rayStart = nearWorld.head<3>();
+    rayEnd = farWorld.head<3>();
+    return true;
+}
+
+static bool selectCableEdgeAtScreenPosition(
+    const ::Vector2i& screenPos,
+    size_t& outPieceIndex,
+    size_t& outEdgeIndex,
+    Real& outRayDepthT,
+    Real& outEdgeT,
+    Vector3r& outGrabbedPoint)
+{
+    SimulationModel* model = Simulation::getCurrent()->getModel();
+    if (model == nullptr)
+        return false;
+
+    Vector3r rayStart(0.0, 0.0, 0.0);
+    Vector3r rayEnd(0.0, 0.0, 0.0);
+    if (!buildPickRay(screenPos, rayStart, rayEnd))
+        return false;
+
+    const std::vector<std::vector<Vector3r>> ropePieces = collectCurrentCablePieces(model);
+    if (ropePieces.empty())
+        return false;
+
+    size_t bestPiece = std::numeric_limits<size_t>::max();
+    size_t bestEdge = std::numeric_limits<size_t>::max();
+    Real bestDistance = std::numeric_limits<Real>::max();
+    Real bestRayT = static_cast<Real>(0.0);
+    Real bestEdgeT = static_cast<Real>(0.0);
+    Vector3r bestGrabbedPoint = Vector3r::Zero();
+
+    for (size_t pieceIndex = 0; pieceIndex < ropePieces.size(); ++pieceIndex)
+    {
+        const std::vector<Vector3r>& piece = ropePieces[pieceIndex];
+        for (size_t edgeIndex = 0; edgeIndex + 1 < piece.size(); ++edgeIndex)
+        {
+            Real s = static_cast<Real>(0.0);
+            Real t = static_cast<Real>(0.0);
+            Vector3r c1, c2;
+            closestPtSegmentSegment(
+                rayStart,
+                rayEnd,
+                piece[edgeIndex],
+                piece[edgeIndex + 1],
+                s,
+                t,
+                c1,
+                c2);
+
+            const Real distance = (c1 - c2).norm();
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestPiece = pieceIndex;
+                bestEdge = edgeIndex;
+                bestRayT = s;
+                bestEdgeT = t;
+                bestGrabbedPoint = c2;
+            }
+        }
+    }
+
+    const Real dragThreshold = std::max(
+        static_cast<Real>(0.15),
+        static_cast<Real>(2.0) * g_cfg.rope.renderRadius);
+    if (bestPiece == std::numeric_limits<size_t>::max() || bestDistance > dragThreshold)
+        return false;
+
+    outPieceIndex = bestPiece;
+    outEdgeIndex = bestEdge;
+    outRayDepthT = bestRayT;
+    outEdgeT = bestEdgeT;
+    outGrabbedPoint = bestGrabbedPoint;
+    return true;
+}
+
+static bool beginMouseDragAtScreenPosition(const ::Vector2i& screenPos)
+{
+    size_t pieceIndex = std::numeric_limits<size_t>::max();
+    size_t edgeIndex = std::numeric_limits<size_t>::max();
+    Real rayDepthT = static_cast<Real>(0.0);
+    Real edgeT = static_cast<Real>(0.0);
+    Vector3r grabbedPoint = Vector3r::Zero();
+    if (!selectCableEdgeAtScreenPosition(
+            screenPos,
+            pieceIndex,
+            edgeIndex,
+            rayDepthT,
+            edgeT,
+            grabbedPoint))
+    {
+        return false;
+    }
+
+    g_mouseDrag.active = true;
+    g_mouseDrag.selected = true;
+    g_mouseDrag.pieceIndex = pieceIndex;
+    g_mouseDrag.edgeIndex = edgeIndex;
+    g_mouseDrag.edgeT = edgeT;
+    g_mouseDrag.rayDepthT = rayDepthT;
+    g_mouseDrag.grabbedPoint = grabbedPoint;
+    g_mouseDrag.targetPoint = grabbedPoint;
+    return true;
+}
+
+static void updateMouseDragTargetAtScreenPosition(const ::Vector2i& screenPos)
+{
+    if (!g_mouseDrag.active)
+        return;
+
+    Vector3r rayStart(0.0, 0.0, 0.0);
+    Vector3r rayEnd(0.0, 0.0, 0.0);
+    if (!buildPickRay(screenPos, rayStart, rayEnd))
+        return;
+
+    g_mouseDrag.targetPoint = rayStart + g_mouseDrag.rayDepthT * (rayEnd - rayStart);
+}
+
+static void applyMouseDragForces(SimulationModel* model, Real dt)
+{
+    if (!g_mouseDrag.active || model == nullptr)
+        return;
+    if (g_mouseDrag.pieceIndex >= g_cablePieceRanges.size())
+        return;
+
+    const std::pair<unsigned int, unsigned int> range =
+        g_cablePieceRanges[g_mouseDrag.pieceIndex];
+
+    if (range.second <= range.first)
+        return;
+
+    const unsigned int localEdgeIndex = static_cast<unsigned int>(g_mouseDrag.edgeIndex);
+    const unsigned int i0 = range.first + localEdgeIndex;
+    const unsigned int i1 = i0 + 1;
+
+    ParticleData& particles = model->getParticles();
+    if (i1 >= particles.getNumberOfParticles())
+        return;
+
+    const Real w0 = static_cast<Real>(1.0) - g_mouseDrag.edgeT;
+    const Real w1 = g_mouseDrag.edgeT;
+
+    const Vector3r p0 = particles.getPosition(i0);
+    const Vector3r p1 = particles.getPosition(i1);
+    const Vector3r v0 = particles.getVelocity(i0);
+    const Vector3r v1 = particles.getVelocity(i1);
+
+    const Vector3r currentPoint = w0 * p0 + w1 * p1;
+    const Vector3r currentVelocity = w0 * v0 + w1 * v1;
+
+    Vector3r acceleration =
+        g_mouseDragSpring * (g_mouseDrag.targetPoint - currentPoint) -
+        g_mouseDragDamping * currentVelocity;
+
+    const Real accelNorm = acceleration.norm();
+    if (accelNorm > g_mouseDragMaxAccel)
+        acceleration *= (g_mouseDragMaxAccel / accelNorm);
+
+    if (particles.getMass(i0) > 0.0)
+        particles.getVelocity(i0) += dt * w0 * acceleration;
+    if (particles.getMass(i1) > 0.0)
+        particles.getVelocity(i1) += dt * w1 * acceleration;
+}
+
+static void endMouseDrag()
+{
+    g_mouseDrag.active = false;
+}
+
+static bool cutSelectedCableSegment()
+{
+    if (!g_mouseDrag.selected ||
+        g_mouseDrag.pieceIndex == std::numeric_limits<size_t>::max() ||
+        g_mouseDrag.edgeIndex == std::numeric_limits<size_t>::max())
+    {
+        return false;
+    }
+
+    SimulationModel* model = Simulation::getCurrent()->getModel();
+    if (model == nullptr)
+        return false;
+
+    const size_t pieceIndex = g_mouseDrag.pieceIndex;
+    const size_t edgeIndex = g_mouseDrag.edgeIndex;
+    std::vector<std::vector<Vector3r>> splitPieces = collectCurrentCablePieces(model);
+    if (!splitCablePieceAtEdge(splitPieces, pieceIndex, edgeIndex))
+        return false;
+
+    g_cablePieces = std::move(splitPieces);
+    g_useSavedCableSnapshot = false;
+    g_snapshotCycleIndex = -1;
+    g_mouseDrag = MouseDragState();
+    g_cachedCableKymoKnotResults.clear();
+    g_hasCableKymoKnotResults = false;
+
+    std::cout << "Cut cable piece " << pieceIndex
+              << " at edge " << edgeIndex << std::endl;
+    Simulation::getCurrent()->getModel()->cleanup();
+    buildModel();
+    return true;
+}
+
+static bool handleMousePress(int button, int action, int mods)
+{
+    (void)mods;
+    if (button != 0)
+        return false;
+
+    if (action == 1)
+    {
+        double x = 0.0;
+        double y = 0.0;
+        glfwGetCursorPos(MiniGL::getWindow(), &x, &y);
+        return beginMouseDragAtScreenPosition(::Vector2i(static_cast<int>(x), static_cast<int>(y)));
+    }
+
+    if (action == 0)
+    {
+        endMouseDrag();
+        return true;
+    }
+
+    return false;
+}
+
+static bool handleMouseMove(int x, int y)
+{
+    if (!g_mouseDrag.active)
+        return false;
+
+    if (glfwGetMouseButton(MiniGL::getWindow(), GLFW_MOUSE_BUTTON_1) != GLFW_PRESS)
+    {
+        endMouseDrag();
+        return false;
+    }
+
+    updateMouseDragTargetAtScreenPosition(::Vector2i(x, y));
+    return true;
+}
+
 static void buildModel()
 {
     TimeManager::getCurrent()->setTimeStepSize(g_cfg.physics.timeStep);
 
     SimulationModel* model = Simulation::getCurrent()->getModel();
-    std::vector<Vector3r> ropePoints;
     g_currentSnapshotPath.clear();
-    if (!g_useSavedCableSnapshot || !loadCableSnapshot(getCableSnapshotPath(), ropePoints))
-    {
-        if (g_cfg.randomCable.enabled)
-        {
-            ropePoints = generateRandomCableMessPolyline(
-                g_cfg.layout,
-                g_cfg.rope,
-                g_cfg.randomCable,
-                g_cfg.groundY);
-        }
-        else
-        {
-            ropePoints = generateStraightCablePolyline(g_cfg.layout, g_cfg.rope);
-        }
-        if (g_useSavedCableSnapshot)
-            g_useSavedCableSnapshot = false;
-    }
+    if (g_cablePieces.empty())
+        initializeCablePieces();
 
     g_hasKymoKnotResult = false;
     g_lastKymoKnotResult = PBD::KymoKnotAnalysisResult();
 
-    addCableModel(model, ropePoints, g_cfg.rope);
-
-    if (g_firstParticle < model->getParticles().getNumberOfParticles() &&
-        g_lastParticle < model->getParticles().getNumberOfParticles())
-    {
-        g_targetA = model->getParticles().getPosition(g_firstParticle);
-        g_targetB = model->getParticles().getPosition(g_lastParticle);
-    }
+    rebuildCableFromPieces(model, g_cablePieces);
 }
 
 static std::vector<Vector3r> generateStraightCablePolyline(
@@ -1123,62 +1411,19 @@ static void auditSnapshotLibrary()
     }
 }
 
-static void applyBendTwistRestStateCreep(
+static void addCableModel(
     SimulationModel* model,
-    const RestShapeCreepConfig& creepCfg)
+    std::vector<Vector3r>& ropePoints,
+    const RopeConfig& ropeCfg)
 {
-    if (!creepCfg.enabled || model == nullptr)
-        return;
-
-    g_restCreepCounter++;
-    if (creepCfg.stepInterval == 0 || (g_restCreepCounter % creepCfg.stepInterval) != 0)
-        return;
-
-    OrientationData& orientations = model->getOrientations();
-    SimulationModel::ConstraintVector& constraints = model->getConstraints();
-
-    for (Constraint* constraint : constraints)
-    {
-        if (constraint == nullptr || constraint->getTypeId() != BendTwistConstraint::TYPE_ID)
-            continue;
-
-        BendTwistConstraint* bendTwist = static_cast<BendTwistConstraint*>(constraint);
-        const unsigned int q0Index = bendTwist->m_bodies[0];
-        const unsigned int q1Index = bendTwist->m_bodies[1];
-        if (q0Index >= orientations.getNumberOfQuaternions() ||
-            q1Index >= orientations.getNumberOfQuaternions())
-        {
-            continue;
-        }
-
-        Quaternionr currentRelative =
-            orientations.getQuaternion(q0Index).conjugate() *
-            orientations.getQuaternion(q1Index);
-        currentRelative.normalize();
-
-        Quaternionr& restRelative = bendTwist->m_restDarbouxVector;
-        if (restRelative.dot(currentRelative) < static_cast<Real>(0.0))
-            currentRelative.coeffs() *= static_cast<Real>(-1.0);
-
-        const Real mismatch =
-            (restRelative.coeffs() - currentRelative.coeffs()).squaredNorm();
-        if (mismatch < creepCfg.activationThreshold)
-            continue;
-
-        Eigen::Matrix<Real, 4, 1> blendedCoeffs =
-            (static_cast<Real>(1.0) - creepCfg.creep) * restRelative.coeffs() +
-            creepCfg.creep * currentRelative.coeffs();
-
-        const Real norm = blendedCoeffs.norm();
-        if (norm > static_cast<Real>(1e-12))
-            restRelative.coeffs() = blendedCoeffs / norm;
-    }
+    addCableModel(model, ropePoints, ropeCfg, nullptr);
 }
 
 static void addCableModel(
     SimulationModel* model,
     std::vector<Vector3r>& ropePoints,
-    const RopeConfig& ropeCfg)
+    const RopeConfig& ropeCfg,
+    std::pair<unsigned int, unsigned int>* particleRangeOut)
 {
     // Convert the sampled centerline into orientation frames and then attach
     // the rod constraints expected by the PBD line model.
@@ -1231,6 +1476,8 @@ static void addCableModel(
 
     g_firstParticle = firstParticle;
     g_lastParticle = lastParticle;
+    if (particleRangeOut != nullptr)
+        *particleRangeOut = std::make_pair(firstParticle, lastParticle);
 
     OrientationData& orientations = model->getOrientations();
     const unsigned int firstQuat =
@@ -1289,7 +1536,9 @@ static void timeStep()
 
     for (unsigned int step = 0; step < stepsPerFrame; ++step)
     {
-        applyPullForces(model, dt, g_cfg.physics);
+        applyMouseDragForces(model, dt);
+        if (g_pullEnabled)
+            applyPullForces(model, dt, g_cfg.physics);
 
         Simulation::getCurrent()->getTimeStep()->step(*model);
 
@@ -1321,355 +1570,6 @@ static void timeStep()
     }
 }
 
-static void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig& physicsCfg)
-{
-    ParticleData& particles = model->getParticles();
-
-    // Targets act like damped springs at the velocity level, so they steer
-    // the ends without hard-position pinning them.
-    auto pullOneParticle = [&](unsigned int particleIndex, const Vector3r& target)
-    {
-        if (particleIndex >= particles.getNumberOfParticles())
-            return;
-        if (particles.getMass(particleIndex) <= 0.0)
-            return;
-
-        const Vector3r position = particles.getPosition(particleIndex);
-        Vector3r& velocity = particles.getVelocity(particleIndex);
-        Vector3r acceleration =
-            physicsCfg.pullSpring * (target - position) -
-            physicsCfg.pullDamping * velocity;
-
-        const Real accelNorm = acceleration.norm();
-        if (accelNorm > physicsCfg.pullMaxAccel)
-            acceleration *= (physicsCfg.pullMaxAccel / accelNorm);
-
-        velocity += dt * acceleration;
-    };
-
-    pullOneParticle(g_firstParticle, g_targetA);
-    pullOneParticle(g_lastParticle, g_targetB);
-}
-
-static Real clamp01(Real x)
-{
-    if (x < static_cast<Real>(0.0))
-        return static_cast<Real>(0.0);
-    if (x > static_cast<Real>(1.0))
-        return static_cast<Real>(1.0);
-    return x;
-}
-
-static Real getInverseMass(const ParticleData& pd, unsigned int index)
-{
-    return (pd.getMass(index) > 0.0)
-        ? static_cast<Real>(1.0) / pd.getMass(index)
-        : static_cast<Real>(0.0);
-}
-
-static void closestPtSegmentSegment(
-    const Vector3r& p1, const Vector3r& q1,
-    const Vector3r& p2, const Vector3r& q2,
-    Real& s, Real& t,
-    Vector3r& c1, Vector3r& c2)
-{
-    const Real eps = static_cast<Real>(1e-8);
-
-    const Vector3r d1 = q1 - p1;
-    const Vector3r d2 = q2 - p2;
-    const Vector3r r = p1 - p2;
-
-    const Real a = d1.dot(d1);
-    const Real e = d2.dot(d2);
-    const Real f = d2.dot(r);
-
-    if (a <= eps && e <= eps)
-    {
-        s = static_cast<Real>(0.0);
-        t = static_cast<Real>(0.0);
-        c1 = p1;
-        c2 = p2;
-        return;
-    }
-
-    const Real c = d1.dot(r);
-
-    if (a <= eps)
-    {
-        s = static_cast<Real>(0.0);
-        t = clamp01(f / e);
-    }
-    else if (e <= eps)
-    {
-        t = static_cast<Real>(0.0);
-        s = clamp01(-c / a);
-    }
-    else
-    {
-        const Real b = d1.dot(d2);
-        const Real denom = a * e - b * b;
-
-        if (std::abs(denom) > eps)
-            s = clamp01((b * f - c * e) / denom);
-        else
-            s = static_cast<Real>(0.0);
-
-        t = (b * s + f) / e;
-
-        if (t < static_cast<Real>(0.0))
-        {
-            t = static_cast<Real>(0.0);
-            s = clamp01(-c / a);
-        }
-        else if (t > static_cast<Real>(1.0))
-        {
-            t = static_cast<Real>(1.0);
-            s = clamp01((b - c) / a);
-        }
-    }
-
-    c1 = p1 + s * d1;
-    c2 = p2 + t * d2;
-}
-
-static void recomputeVelocitiesFromPositions(
-    SimulationModel* model,
-    const std::vector<Vector3r>& oldPositions,
-    Real dt,
-    Real blend)
-{
-    ParticleData& pd = model->getParticles();
-    const unsigned int n = pd.getNumberOfParticles();
-    if (oldPositions.size() != n || dt <= static_cast<Real>(1e-12))
-        return;
-
-    blend = std::max(static_cast<Real>(0.0), std::min(static_cast<Real>(1.0), blend));
-
-    // Blend physical velocities toward the actually observed post-correction motion.
-    for (unsigned int i = 0; i < n; ++i)
-    {
-        if (pd.getMass(i) <= 0.0)
-            continue;
-
-        const Vector3r vPos = (pd.getPosition(i) - oldPositions[i]) / dt;
-        Vector3r& v = pd.getVelocity(i);
-        v = (static_cast<Real>(1.0) - blend) * v + blend * vPos;
-    }
-}
-
-static std::vector<std::pair<unsigned int, unsigned int>>
-collectSelfCollisionCandidatesSpatialHash(
-    const ParticleData& pd,
-    Real inflate,
-    Real cellSize)
-{
-    const unsigned int n = pd.getNumberOfParticles();
-    if (n < 4)
-        return {};
-
-    const unsigned int nEdges = n - 1;
-    std::unordered_map<Int3, std::vector<unsigned int>, Int3Hash> grid;
-    grid.reserve(nEdges * 2);
-
-    // Hash each edge AABB into a 3D grid, then only test pairs that share cells.
-    auto cellOf = [cellSize](const Vector3r& p) -> Int3
-    {
-        return Int3{
-            static_cast<int>(std::floor(p.x() / cellSize)),
-            static_cast<int>(std::floor(p.y() / cellSize)),
-            static_cast<int>(std::floor(p.z() / cellSize))
-        };
-    };
-
-    for (unsigned int e = 0; e < nEdges; ++e)
-    {
-        const Vector3r p0 = pd.getPosition(e);
-        const Vector3r p1 = pd.getPosition(e + 1);
-
-        Vector3r bmin = p0.cwiseMin(p1);
-        Vector3r bmax = p0.cwiseMax(p1);
-        bmin.array() -= inflate;
-        bmax.array() += inflate;
-
-        const Int3 cmin = cellOf(bmin);
-        const Int3 cmax = cellOf(bmax);
-
-        for (int x = cmin.x; x <= cmax.x; ++x)
-        {
-            for (int y = cmin.y; y <= cmax.y; ++y)
-            {
-                for (int z = cmin.z; z <= cmax.z; ++z)
-                    grid[Int3{x, y, z}].push_back(e);
-            }
-        }
-    }
-
-    std::unordered_set<uint64_t> uniquePairs;
-    uniquePairs.reserve(nEdges * 8);
-
-    for (const auto& entry : grid)
-    {
-        const std::vector<unsigned int>& edges = entry.second;
-        for (size_t a = 0; a < edges.size(); ++a)
-        {
-            for (size_t b = a + 1; b < edges.size(); ++b)
-            {
-                const unsigned int i = edges[a];
-                const unsigned int j = edges[b];
-
-                if (i == j)
-                    continue;
-                if (j <= i + 1 && j >= i)
-                    continue;
-
-                uniquePairs.insert(makeOrderedEdgePairKey(i, j));
-            }
-        }
-    }
-
-    std::vector<std::pair<unsigned int, unsigned int>> pairs;
-    pairs.reserve(uniquePairs.size());
-    for (uint64_t key : uniquePairs)
-    {
-        pairs.emplace_back(
-            static_cast<unsigned int>(key >> 32),
-            static_cast<unsigned int>(key & 0xffffffffu));
-    }
-
-    return pairs;
-}
-
-static std::vector<SelfCollisionContact> detectSelfCollisionContacts(
-    SimulationModel* model,
-    const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg)
-{
-    std::vector<SelfCollisionContact> contacts;
-    if (model == nullptr)
-        return contacts;
-
-    ParticleData& pd = model->getParticles();
-    const unsigned int n = pd.getNumberOfParticles();
-    if (n < 4)
-        return contacts;
-
-    const Real minDist = static_cast<Real>(2.0) * collisionCfg.ropeRadius;
-    const Real eps = static_cast<Real>(1e-8);
-    const std::vector<std::pair<unsigned int, unsigned int>> candidates =
-        collectSelfCollisionCandidatesSpatialHash(
-            pd,
-            minDist,
-            collisionCfg.hashCellSize);
-
-    contacts.reserve(candidates.size());
-    for (const auto& pair : candidates)
-    {
-        const unsigned int i = pair.first;
-        const unsigned int j = pair.second;
-
-        const Real arcDist = static_cast<Real>(std::abs((int)j - (int)i)) * ropeCfg.dx;
-        if (arcDist < collisionCfg.excludeArcLength)
-            continue;
-
-        const Vector3r p0 = pd.getPosition(i);
-        const Vector3r p1 = pd.getPosition(i + 1);
-        const Vector3r q0 = pd.getPosition(j);
-        const Vector3r q1 = pd.getPosition(j + 1);
-
-        Real s, t;
-        Vector3r c1, c2;
-        closestPtSegmentSegment(p0, p1, q0, q1, s, t, c1, c2);
-
-        const Vector3r delta = c2 - c1;
-        const Real dist = delta.norm();
-        if (dist - minDist < static_cast<Real>(0.0) || dist <= eps)
-            contacts.push_back({ i, j });
-    }
-
-    return contacts;
-}
-
-static unsigned int countSelfCollisionContactClusters(
-    const std::vector<SelfCollisionContact>& contacts)
-{
-    const size_t n = contacts.size();
-    if (n == 0)
-        return 0;
-
-    std::vector<unsigned char> visited(n, 0);
-    unsigned int clusterCount = 0;
-
-    auto contactsShareEdge = [](const SelfCollisionContact& a, const SelfCollisionContact& b)
-    {
-        return a.edgeA == b.edgeA ||
-               a.edgeA == b.edgeB ||
-               a.edgeB == b.edgeA ||
-               a.edgeB == b.edgeB;
-    };
-
-    for (size_t start = 0; start < n; ++start)
-    {
-        if (visited[start] != 0)
-            continue;
-
-        clusterCount++;
-        std::vector<size_t> stack(1, start);
-        visited[start] = 1;
-
-        while (!stack.empty())
-        {
-            const size_t current = stack.back();
-            stack.pop_back();
-
-            for (size_t next = 0; next < n; ++next)
-            {
-                if (visited[next] != 0)
-                    continue;
-                if (!contactsShareEdge(contacts[current], contacts[next]))
-                    continue;
-
-                visited[next] = 1;
-                stack.push_back(next);
-            }
-        }
-    }
-
-    return clusterCount;
-}
-
-static void printSelfCollisionContacts(
-    const std::vector<SelfCollisionContact>& contacts)
-{
-    std::cout << "Self-collision contacts (" << contacts.size() << "):";
-    if (contacts.empty())
-    {
-        std::cout << " none" << std::endl;
-        return;
-    }
-
-    std::cout << std::endl;
-    for (const SelfCollisionContact& contact : contacts)
-    {
-        std::cout << "  (" << contact.edgeA << ", " << contact.edgeB << ")"
-                  << std::endl;
-    }
-}
-
-static std::vector<Vector3r> getCurrentCablePoints(SimulationModel* model)
-{
-    std::vector<Vector3r> points;
-    if (model == nullptr || g_lastParticle < g_firstParticle)
-        return points;
-
-    ParticleData& particles = model->getParticles();
-    const unsigned int count = g_lastParticle - g_firstParticle + 1;
-    points.reserve(count);
-    for (unsigned int i = 0; i < count; ++i)
-        points.push_back(particles.getPosition(g_firstParticle + i));
-
-    return points;
-}
-
 static bool isLocalIndexInKymoKnotSegment(
     int localIndex,
     const PBD::KymoKnotSegment& segment)
@@ -1683,12 +1583,18 @@ static bool isLocalIndexInKymoKnotSegment(
     return localIndex >= segment.start || localIndex <= segment.end;
 }
 
-static bool isLocalIndexHighlighted(int localIndex)
+static bool isLocalIndexHighlighted(size_t pieceIndex, int localIndex)
 {
-    if (!g_hasKymoKnotResult)
+    if (!g_hasCableKymoKnotResults ||
+        pieceIndex >= g_cachedCableKymoKnotResults.size())
         return false;
 
-    for (const PBD::KymoKnotSegment& segment : g_lastKymoKnotResult.segments)
+    const PBD::KymoKnotAnalysisResult& knotResult =
+        g_cachedCableKymoKnotResults[pieceIndex];
+    if (!knotResult.available)
+        return false;
+
+    for (const PBD::KymoKnotSegment& segment : knotResult.segments)
     {
         if (isLocalIndexInKymoKnotSegment(localIndex, segment))
             return true;
@@ -1696,16 +1602,32 @@ static bool isLocalIndexHighlighted(int localIndex)
     return false;
 }
 
-static bool isLocalEdgeHighlighted(int localEdgeIndex)
+static bool isLocalEdgeHighlighted(size_t pieceIndex, int localEdgeIndex)
 {
-    return isLocalIndexHighlighted(localEdgeIndex) ||
-           isLocalIndexHighlighted(localEdgeIndex + 1);
+    return isLocalIndexHighlighted(pieceIndex, localEdgeIndex) ||
+           isLocalIndexHighlighted(pieceIndex, localEdgeIndex + 1);
 }
 
 static void cacheKymoKnotResult(const PBD::KymoKnotAnalysisResult& result)
 {
     g_lastKymoKnotResult = result;
     g_hasKymoKnotResult = result.available && !result.segments.empty();
+}
+
+static void cacheCableKymoKnotResults(
+    const std::vector<PBD::KymoKnotAnalysisResult>& results)
+{
+    g_cachedCableKymoKnotResults = results;
+    g_hasCableKymoKnotResults = false;
+
+    for (const PBD::KymoKnotAnalysisResult& result : g_cachedCableKymoKnotResults)
+    {
+        if (result.available && !result.segments.empty())
+        {
+            g_hasCableKymoKnotResults = true;
+            break;
+        }
+    }
 }
 
 static const char* getKymoKnotSearchModeName(PBD::KymoKnotSearchMode mode)
@@ -1732,43 +1654,66 @@ static void printTanglementMetrics(
 {
     const std::vector<SelfCollisionContact> contacts =
         detectSelfCollisionContacts(model, ropeCfg, collisionCfg);
-    const unsigned int clusterCount = countSelfCollisionContactClusters(contacts);
 
     std::cout << "Tanglement metrics:"
               << " self-collisions=" << contacts.size()
-              << ", collision-blobs=" << clusterCount
               << std::endl;
 
-    const std::vector<Vector3r> cablePoints = getCurrentCablePoints(model);
     const std::string bridgeRoot =
         (base != nullptr)
             ? Utilities::FileSystem::normalizePath(base->getOutputPath() + "/kymoknot_bridge")
             : "kymoknot_bridge";
-    const PBD::KymoKnotAnalysisResult knotResult =
-        PBD::KymoKnotAnalyzer::analyzeLinear(
-            cablePoints,
-            bridgeRoot,
-            g_kymoKnotSearchMode);
+    const std::vector<std::vector<Vector3r>> ropePieces =
+        collectCurrentCablePieces(model);
 
-    if (!knotResult.available)
+    if (ropePieces.empty())
     {
+        g_cachedCableKymoKnotResults.clear();
+        g_hasCableKymoKnotResults = false;
         g_hasKymoKnotResult = false;
-        std::cout << "KymoKnot: " << knotResult.message << std::endl;
+        std::cout << "KymoKnot: no cable pieces" << std::endl;
         return;
     }
 
-    cacheKymoKnotResult(knotResult);
-    std::cout << "KymoKnot segments: " << knotResult.segments.size() << std::endl;
-    for (size_t i = 0; i < knotResult.segments.size(); ++i)
+    std::vector<PBD::KymoKnotAnalysisResult> cableResults;
+    cableResults.reserve(ropePieces.size());
+    for (size_t pieceIndex = 0; pieceIndex < ropePieces.size(); ++pieceIndex)
     {
-        const PBD::KymoKnotSegment& segment = knotResult.segments[i];
-        std::cout << "  [" << i << "] "
-                  << segment.knotType
-                  << " start=" << segment.start
-                  << " end=" << segment.end
-                  << " length=" << segment.length
-                  << std::endl;
+        const std::vector<Vector3r>& cablePoints = ropePieces[pieceIndex];
+        if (cablePoints.size() < 2)
+        {
+            cableResults.push_back(PBD::KymoKnotAnalysisResult());
+            continue;
+        }
+
+        const PBD::KymoKnotAnalysisResult knotResult =
+            PBD::KymoKnotAnalyzer::analyzeLinear(
+                cablePoints,
+                bridgeRoot,
+                g_kymoKnotSearchMode);
+        cableResults.push_back(knotResult);
+
+        std::cout << "Cable piece " << pieceIndex << ": ";
+        if (!knotResult.available)
+        {
+            std::cout << knotResult.message << std::endl;
+            continue;
+        }
+
+        std::cout << "KymoKnot segments: " << knotResult.segments.size() << std::endl;
+        for (size_t i = 0; i < knotResult.segments.size(); ++i)
+        {
+            const PBD::KymoKnotSegment& segment = knotResult.segments[i];
+            std::cout << "  [" << i << "] "
+                      << segment.knotType
+                      << " start=" << segment.start
+                      << " end=" << segment.end
+                      << " length=" << segment.length
+                      << std::endl;
+        }
     }
+
+    cacheCableKymoKnotResults(cableResults);
 }
 
 static void getHeightColor(Real y, float* color)
@@ -1801,214 +1746,6 @@ static void getHeightColor(Real y, float* color)
     color[3] = 1.0f;
 }
 
-static uint64_t makeOrderedEdgePairKey(unsigned int a, unsigned int b)
-{
-    const uint64_t lo = std::min<uint64_t>(a, b);
-    const uint64_t hi = std::max<uint64_t>(a, b);
-    return (lo << 32) | hi;
-}
-
-static Vector3r clampVec(const Vector3r& v, Real maxNorm)
-{
-    const Real len = v.norm();
-    if (len > maxNorm && len > static_cast<Real>(1e-12))
-        return v * (maxNorm / len);
-    return v;
-}
-
-static void applySelfCollisionXPBD(
-    SimulationModel* model,
-    Real dt,
-    const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg)
-{
-    ParticleData& pd = model->getParticles();
-    const unsigned int n = pd.getNumberOfParticles();
-    if (n < 4)
-        return;
-
-    const Real minDist = static_cast<Real>(2.0) * collisionCfg.ropeRadius;
-    const Real eps = static_cast<Real>(1e-8);
-    const Real alpha = collisionCfg.compliance / (dt * dt);
-
-    static std::vector<Vector3r> posDelta;
-    static std::vector<unsigned int> contactCount;
-    static std::vector<VelocityPairCorrection> velocityCorrections;
-
-    if (posDelta.size() < n)
-        posDelta.resize(n);
-    if (contactCount.size() < n)
-        contactCount.resize(n);
-
-    for (unsigned int i = 0; i < n; ++i)
-    {
-        posDelta[i].setZero();
-        contactCount[i] = 0;
-    }
-
-    velocityCorrections.clear();
-    velocityCorrections.reserve(n * 2);
-
-    const std::vector<std::pair<unsigned int, unsigned int>> candidates =
-        collectSelfCollisionCandidatesSpatialHash(
-            pd,
-            minDist,
-            collisionCfg.hashCellSize);
-
-    // First solve position-level separation, then damp the corresponding
-    // relative contact velocities.
-    for (const auto& pair : candidates)
-    {
-        const unsigned int i = pair.first;
-        const unsigned int j = pair.second;
-
-        const Real arcDist = static_cast<Real>(std::abs((int)j - (int)i)) * ropeCfg.dx;
-        if (arcDist < collisionCfg.excludeArcLength)
-            continue;
-
-        const unsigned int i0 = i;
-        const unsigned int i1 = i + 1;
-        const unsigned int j0 = j;
-        const unsigned int j1 = j + 1;
-
-        const Vector3r p0 = pd.getPosition(i0);
-        const Vector3r p1 = pd.getPosition(i1);
-        const Vector3r q0 = pd.getPosition(j0);
-        const Vector3r q1 = pd.getPosition(j1);
-
-        Real s, t;
-        Vector3r c1, c2;
-        closestPtSegmentSegment(p0, p1, q0, q1, s, t, c1, c2);
-
-        Vector3r delta = c2 - c1;
-        Real dist = delta.norm();
-
-        Vector3r nrm;
-        if (dist > eps)
-        {
-            nrm = delta / dist;
-        }
-        else
-        {
-            nrm = (p1 - p0).cross(q1 - q0);
-            if (nrm.squaredNorm() < eps)
-                nrm = Vector3r(1, 0, 0);
-            else
-                nrm.normalize();
-
-            dist = static_cast<Real>(0.0);
-        }
-
-        const Real C = dist - minDist;
-        if (C >= static_cast<Real>(0.0))
-            continue;
-
-        const Real wP0 = static_cast<Real>(1.0) - s;
-        const Real wP1 = s;
-        const Real wQ0 = static_cast<Real>(1.0) - t;
-        const Real wQ1 = t;
-
-        const Real invMassP0 = getInverseMass(pd, i0);
-        const Real invMassP1 = getInverseMass(pd, i1);
-        const Real invMassQ0 = getInverseMass(pd, j0);
-        const Real invMassQ1 = getInverseMass(pd, j1);
-
-        if (invMassP0 + invMassP1 + invMassQ0 + invMassQ1 <= eps)
-            continue;
-
-        const Vector3r gradP0 = -wP0 * nrm;
-        const Vector3r gradP1 = -wP1 * nrm;
-        const Vector3r gradQ0 = wQ0 * nrm;
-        const Vector3r gradQ1 = wQ1 * nrm;
-
-        const Real denom =
-            invMassP0 * gradP0.squaredNorm() +
-            invMassP1 * gradP1.squaredNorm() +
-            invMassQ0 * gradQ0.squaredNorm() +
-            invMassQ1 * gradQ1.squaredNorm() +
-            alpha;
-        if (denom <= eps)
-            continue;
-
-        const Real deltaLambda = -C / denom;
-
-        Vector3r dp0 = clampVec(invMassP0 * deltaLambda * gradP0, collisionCfg.maxCorrection);
-        Vector3r dp1 = clampVec(invMassP1 * deltaLambda * gradP1, collisionCfg.maxCorrection);
-        Vector3r dq0 = clampVec(invMassQ0 * deltaLambda * gradQ0, collisionCfg.maxCorrection);
-        Vector3r dq1 = clampVec(invMassQ1 * deltaLambda * gradQ1, collisionCfg.maxCorrection);
-
-        if (invMassP0 > 0.0)
-        {
-            posDelta[i0] += dp0;
-            contactCount[i0] += 1;
-        }
-        if (invMassP1 > 0.0)
-        {
-            posDelta[i1] += dp1;
-            contactCount[i1] += 1;
-        }
-        if (invMassQ0 > 0.0)
-        {
-            posDelta[j0] += dq0;
-            contactCount[j0] += 1;
-        }
-        if (invMassQ1 > 0.0)
-        {
-            posDelta[j1] += dq1;
-            contactCount[j1] += 1;
-        }
-
-        velocityCorrections.push_back({ i0, i1, j0, j1, wP0, wP1, wQ0, wQ1, nrm });
-    }
-
-    for (unsigned int i = 0; i < n; ++i)
-    {
-        if (pd.getMass(i) <= 0.0 || contactCount[i] == 0)
-            continue;
-
-        const Real averageScale =
-            static_cast<Real>(0.5) / static_cast<Real>(contactCount[i]);
-        Vector3r corr = clampVec(averageScale * posDelta[i], collisionCfg.maxCorrection);
-        pd.setPosition(i, pd.getPosition(i) + corr);
-    }
-
-    for (const auto& vc : velocityCorrections)
-    {
-        const Real invMassP0 = getInverseMass(pd, vc.i0);
-        const Real invMassP1 = getInverseMass(pd, vc.i1);
-        const Real invMassQ0 = getInverseMass(pd, vc.j0);
-        const Real invMassQ1 = getInverseMass(pd, vc.j1);
-
-        if (invMassP0 + invMassP1 + invMassQ0 + invMassQ1 <= eps)
-            continue;
-
-        const Vector3r vP =
-            vc.wP0 * pd.getVelocity(vc.i0) +
-            vc.wP1 * pd.getVelocity(vc.i1);
-        const Vector3r vQ =
-            vc.wQ0 * pd.getVelocity(vc.j0) +
-            vc.wQ1 * pd.getVelocity(vc.j1);
-
-        const Vector3r relV = vQ - vP;
-        const Real vn = relV.dot(vc.nrm);
-
-        auto applyImpulse = [&](const Vector3r& impulse)
-        {
-            if (invMassP0 > 0.0) pd.getVelocity(vc.i0) -= (vc.wP0 * invMassP0) * impulse;
-            if (invMassP1 > 0.0) pd.getVelocity(vc.i1) -= (vc.wP1 * invMassP1) * impulse;
-            if (invMassQ0 > 0.0) pd.getVelocity(vc.j0) += (vc.wQ0 * invMassQ0) * impulse;
-            if (invMassQ1 > 0.0) pd.getVelocity(vc.j1) += (vc.wQ1 * invMassQ1) * impulse;
-        };
-
-        if (vn < static_cast<Real>(0.0) && collisionCfg.normalDamping > static_cast<Real>(0.0))
-            applyImpulse(-collisionCfg.normalDamping * vn * vc.nrm);
-
-        const Vector3r vt = relV - relV.dot(vc.nrm) * vc.nrm;
-        if (vt.squaredNorm() > eps && collisionCfg.tangentialDamping > static_cast<Real>(0.0))
-            applyImpulse(-collisionCfg.tangentialDamping * vt);
-    }
-}
-
 static void render()
 {
     // `base->render()` is the built-in demo GUI + scene helper rendering.
@@ -2017,11 +1754,11 @@ static void render()
     SimulationModel* model = Simulation::getCurrent()->getModel();
     const ParticleData& particles = model->getParticles();
 
-    float yellow[4] = {1.0f, 0.9f, 0.1f, 1.0f};
-    float magenta[4] = {0.9f, 0.1f, 0.9f, 1.0f};
     float segmentColor[4] = {0.0f, 0.0f, 0.8f, 1.0f};
     float knotColor[4] = {0.98f, 0.25f, 0.18f, 1.0f};
     float knotSphereColor[4] = {1.0f, 0.45f, 0.20f, 1.0f};
+    float selectedColor[4] = {0.98f, 0.82f, 0.10f, 1.0f};
+    float selectedSphereColor[4] = {1.0f, 0.92f, 0.30f, 1.0f};
 
     // Render the rod centerline as spheres plus cylinders.
     for (unsigned int m = 0; m < model->getLineModels().size(); ++m)
@@ -2039,44 +1776,36 @@ static void render()
             const Real avgY = static_cast<Real>(0.5) * (p0.y() + p1.y());
             getHeightColor(avgY, segmentColor);
 
-            const int localEdgeIndex =
-                static_cast<int>(i0) - static_cast<int>(g_firstParticle);
-            const bool highlightKnot = isLocalEdgeHighlighted(localEdgeIndex);
-            const float* activeColor = highlightKnot ? knotColor : segmentColor;
+            const int localEdgeIndex = static_cast<int>(e);
+            const bool highlightKnot = isLocalEdgeHighlighted(m, localEdgeIndex);
+            const bool highlightSelected =
+                g_mouseDrag.selected &&
+                m == g_mouseDrag.pieceIndex &&
+                e == g_mouseDrag.edgeIndex;
+            const float* activeColor =
+                highlightSelected ? selectedColor :
+                (highlightKnot ? knotColor : segmentColor);
 
-            MiniGL::drawSphere(p0, 0.03f, highlightKnot ? knotSphereColor : segmentColor);
+            MiniGL::drawSphere(
+                p0,
+                0.03f,
+                highlightSelected ? selectedSphereColor :
+                (highlightKnot ? knotSphereColor : segmentColor));
             if (e == lineModel->getEdges().size() - 1)
-                MiniGL::drawSphere(p1, 0.03f, isLocalIndexHighlighted(static_cast<int>(i1) - static_cast<int>(g_firstParticle)) ? knotSphereColor : segmentColor);
+                MiniGL::drawSphere(
+                    p1,
+                    0.03f,
+                    isLocalIndexHighlighted(
+                        m,
+                        localEdgeIndex + 1)
+                        ? knotSphereColor
+                        : segmentColor);
 
             MiniGL::drawCylinder(
                 p0,
                 p1,
                 activeColor,
                 static_cast<float>(g_cfg.rope.renderRadius));
-        }
-    }
-
-    MiniGL::drawSphere(g_targetA, 0.08f, yellow);
-    MiniGL::drawSphere(g_targetB, 0.08f, magenta);
-}
-
-static void applyGroundConstraint(Real groundY)
-{
-    SimulationModel* model = Simulation::getCurrent()->getModel();
-    ParticleData& particles = model->getParticles();
-
-    // Clamp particles to the ground plane and remove downward velocity.
-    for (unsigned int i = 0; i < particles.getNumberOfParticles(); ++i)
-    {
-        Vector3r p = particles.getPosition(i);
-        if (p.y() < groundY)
-        {
-            p.y() = groundY;
-            particles.setPosition(i, p);
-
-            Vector3r& v = particles.getVelocity(i);
-            if (v.y() < 0.0)
-                v.y() = 0.0;
         }
     }
 }
