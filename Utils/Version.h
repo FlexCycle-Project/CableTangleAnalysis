@@ -5,14 +5,14 @@
 #define STRINGIZE(x) STRINGIZE_HELPER(x)
 #define WARNING(desc) message(__FILE__ "(" STRINGIZE(__LINE__) ") : Warning: " #desc)
 
-#define GIT_SHA1 "GITDIR-NOTFOUND"
-#define GIT_REFSPEC "GITDIR-NOTFOUND"
-#define GIT_LOCAL_STATUS "HEAD-HASH-NOTFOUND"
+#define GIT_SHA1 "43e0537140a7bae648cbb1aad1b9b96749bed11c"
+#define GIT_REFSPEC "refs/heads/cablemanipulation-slim"
+#define GIT_LOCAL_STATUS "DIRTY"
 
 #define PBD_VERSION "2.2.2"
 
 #ifdef DL_OUTPUT
-
+#pragma WARNING(Local changes not committed.)
 #endif
 
 #endif

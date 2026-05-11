@@ -25,6 +25,14 @@ endif()
 
 add_executable(MyCableDemo
 	  main.cpp
+	  CableGeneration.cpp
+	  CableGeneration.h
+	  CableVisualization.cpp
+	  CableVisualization.h
+	  CablePhysics.cpp
+	  CablePhysics.h
+	  TanglementAnalyzer.cpp
+	  TanglementAnalyzer.h
 	  KymoKnotAnalyzer.cpp
 	  KymoKnotAnalyzer.h
 

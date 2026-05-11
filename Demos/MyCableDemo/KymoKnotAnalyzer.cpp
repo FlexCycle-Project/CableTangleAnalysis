@@ -3,11 +3,13 @@
 #include "Utils/FileSystem.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <sstream>
 #include <fstream>
 #include <iomanip>
-#include <sstream>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -70,6 +72,28 @@ namespace PBD
 			return "C:/Users/alpse/Desktop/KymoKnot-clone";
 		}
 
+		static std::string makeTempWorkDirectory()
+		{
+			const auto tick = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+			static std::atomic<unsigned int> counter{0};
+			const unsigned int id = ++counter;
+			std::string tempRoot;
+#ifdef _WIN32
+			char tempBuffer[MAX_PATH] = {0};
+			const DWORD length = GetTempPathA(MAX_PATH, tempBuffer);
+			if (length > 0 && length < MAX_PATH)
+				tempRoot = tempBuffer;
+#endif
+			if (tempRoot.empty())
+				tempRoot = "C:/Temp";
+
+			const std::string workDir = Utilities::FileSystem::normalizePath(
+				tempRoot + "/MyCableDemo/KymoKnot/run_" +
+				std::to_string(tick) + "_" + std::to_string(id));
+			Utilities::FileSystem::makeDirs(workDir);
+			return workDir;
+		}
+
 		static bool writeLinearSnapshot(
 			const std::vector<Vector3r>& points,
 			const std::string& fileName)
@@ -106,8 +130,7 @@ namespace PBD
 
 				for (size_t i = 0; i + 3 < tokens.size(); ++i)
 				{
-					const std::string& knotToken = tokens[i];
-					if (knotToken != "UN" && knotToken.find('_') == std::string::npos)
+					if (isIntegerToken(tokens[i]))
 						continue;
 					if (!isIntegerToken(tokens[i + 1]) ||
 						!isIntegerToken(tokens[i + 2]) ||
@@ -117,15 +140,61 @@ namespace PBD
 					}
 
 					KymoKnotSegment segment;
-					segment.knotType = knotToken;
+					segment.knotType = tokens[i];
 					segment.start = std::atoi(tokens[i + 1].c_str());
 					segment.end = std::atoi(tokens[i + 2].c_str());
 					segment.length = std::atoi(tokens[i + 3].c_str());
 					segments.push_back(segment);
+					break;
 				}
 			}
 
 			return segments;
+		}
+
+		static std::string describeSegments(
+			const std::vector<KymoKnotSegment>& segments,
+			const std::vector<Vector3r>* points)
+		{
+			if (segments.empty())
+				return "unrecognized";
+
+			KymoKnotAnalysisResult tempResult;
+			tempResult.available = true;
+			tempResult.success = true;
+			tempResult.segments = segments;
+			if (KymoKnotAnalyzer::isUnknotResult(tempResult))
+				return "unknot";
+
+			if (points == nullptr || points->size() < 2)
+				return "KymoKnot";
+
+			const std::vector<Vector3r>& cablePoints = *points;
+			const size_t pieceEdges = cablePoints.size() - 1;
+			size_t pieceCoverage = 0;
+			size_t pieceLongest = 0;
+			std::ostringstream out;
+			out << "KymoKnot ";
+			for (size_t i = 0; i < segments.size(); ++i)
+			{
+				const KymoKnotSegment& segment = segments[i];
+				const size_t segmentLength = static_cast<size_t>(std::max(0, segment.length));
+				pieceCoverage += std::min(segmentLength, pieceEdges);
+				pieceLongest = std::max(pieceLongest, segmentLength);
+				if (i > 0)
+					out << ", ";
+				out << segment.knotType
+				    << "[" << segment.start
+				    << "-" << segment.end
+				    << ":" << segment.length << "]";
+			}
+			const Real spanFraction = static_cast<Real>(pieceLongest) /
+				static_cast<Real>(std::max<size_t>(1, pieceEdges));
+			const Real coverageFraction = static_cast<Real>(pieceCoverage) /
+				static_cast<Real>(std::max<size_t>(1, pieceEdges));
+			out << " | span=" << spanFraction
+			    << " coverage=" << coverageFraction;
+			return out.str();
 		}
 
 		static std::string buildRunCommand(
@@ -160,56 +229,122 @@ namespace PBD
 		{
 			return (searchMode == KymoKnotSearchMode::BottomUp) ? "BU__" : "TD__";
 		}
+
+		static KymoKnotAnalysisResult analyzeWithWorkDir(
+			const std::vector<Vector3r>& points,
+			const std::string& bridgeDir,
+			KymoKnotSearchMode searchMode)
+		{
+			KymoKnotAnalysisResult result;
+			if (points.size() < 2)
+			{
+				result.message = "Need at least two cable points.";
+				return result;
+			}
+
+			const std::string rootDir = getKymoKnotRoot();
+			Utilities::FileSystem::makeDirs(bridgeDir);
+
+			static unsigned int runCounter = 0;
+			++runCounter;
+
+			const std::string inputFile = bridgeDir + "/linear_input_" + std::to_string(runCounter) + ".dat";
+			const std::string stdoutFile = bridgeDir + "/linear_run_" + std::to_string(runCounter) + ".out";
+			const std::string stderrFile = bridgeDir + "/linear_run_" + std::to_string(runCounter) + ".err";
+			const std::string outputFile =
+				bridgeDir + "/" + getSearchOutputPrefix(searchMode) +
+				"linear_input_" + std::to_string(runCounter) + ".dat";
+
+			struct TempCleanup
+			{
+				std::string directory;
+				std::string inputFile;
+				std::string stdoutFile;
+				std::string stderrFile;
+				std::string outputFile;
+				~TempCleanup()
+				{
+					if (directory.empty())
+						return;
+#ifdef _WIN32
+					if (!inputFile.empty())
+						DeleteFileA(inputFile.c_str());
+					if (!stdoutFile.empty())
+						DeleteFileA(stdoutFile.c_str());
+					if (!stderrFile.empty())
+						DeleteFileA(stderrFile.c_str());
+					if (!outputFile.empty())
+						DeleteFileA(outputFile.c_str());
+					RemoveDirectoryA(directory.c_str());
+#endif
+				}
+			} cleanup{bridgeDir};
+			cleanup.inputFile = inputFile;
+			cleanup.stdoutFile = stdoutFile;
+			cleanup.stderrFile = stderrFile;
+			cleanup.outputFile = outputFile;
+
+			if (!writeLinearSnapshot(points, inputFile))
+			{
+				result.message = "Failed to write KymoKnot input snapshot.";
+				return result;
+			}
+
+			const std::string command =
+				buildRunCommand(rootDir, inputFile, stdoutFile, stderrFile, searchMode);
+			const int exitCode = std::system(command.c_str());
+			if (exitCode != 0 && !Utilities::FileSystem::isFile(outputFile))
+			{
+				result.message = "KymoKnot command failed.";
+				return result;
+			}
+
+			result.segments = parseKymoKnotOutput(outputFile);
+			result.available = true;
+			result.success = !result.segments.empty();
+			if (!result.success)
+				result.message = "KymoKnot completed, but no segments were parsed.";
+			return result;
+		}
+	}
+
+	KymoKnotAnalysisResult KymoKnotAnalyzer::analyze(
+		const CableGeometry& cable,
+		KymoKnotSearchMode searchMode)
+	{
+		const std::string bridgeDir = makeTempWorkDirectory();
+		return analyzeWithWorkDir(cable.points, bridgeDir, searchMode);
 	}
 
 	KymoKnotAnalysisResult KymoKnotAnalyzer::analyzeLinear(
 		const std::vector<Vector3r>& points,
-		const std::string& bridgeRoot,
 		KymoKnotSearchMode searchMode)
 	{
-		KymoKnotAnalysisResult result;
+		CableGeometry cable;
+		cable.points = points;
+		return analyze(cable, searchMode);
+	}
 
-		if (points.size() < 2)
-		{
-			result.message = "Need at least two cable points.";
-			return result;
-		}
+	bool KymoKnotAnalyzer::isUnknotResult(const KymoKnotAnalysisResult& result)
+	{
+		if (!result.available || !result.success || result.segments.size() != 1)
+			return false;
 
-		const std::string rootDir = getKymoKnotRoot();
-		const std::string bridgeDir = Utilities::FileSystem::normalizePath(
-			bridgeRoot.empty() ? (rootDir + "/kymoknot_bridge") : bridgeRoot);
-		Utilities::FileSystem::makeDirs(bridgeDir);
+		const KymoKnotSegment& segment = result.segments.front();
+		return segment.knotType == "UN" ||
+			(segment.start < 0 && segment.end < 0 && segment.length < 0);
+	}
 
-		static unsigned int runCounter = 0;
-		++runCounter;
-
-		const std::string inputFile = bridgeDir + "/linear_input_" + std::to_string(runCounter) + ".dat";
-		const std::string stdoutFile = bridgeDir + "/linear_run_" + std::to_string(runCounter) + ".out";
-		const std::string stderrFile = bridgeDir + "/linear_run_" + std::to_string(runCounter) + ".err";
-		const std::string outputFile =
-			bridgeDir + "/" + getSearchOutputPrefix(searchMode) +
-			"linear_input_" + std::to_string(runCounter) + ".dat";
-
-		if (!writeLinearSnapshot(points, inputFile))
-		{
-			result.message = "Failed to write KymoKnot input snapshot.";
-			return result;
-		}
-
-		const std::string command =
-			buildRunCommand(rootDir, inputFile, stdoutFile, stderrFile, searchMode);
-		const int exitCode = std::system(command.c_str());
-		if (exitCode != 0 && !Utilities::FileSystem::isFile(outputFile))
-		{
-			result.message = "KymoKnot command failed.";
-			return result;
-		}
-
-		result.segments = parseKymoKnotOutput(outputFile);
-		result.available = true;
-		result.success = !result.segments.empty();
-		if (!result.success)
-			result.message = "KymoKnot completed, but no segments were parsed.";
-		return result;
+	std::string KymoKnotAnalyzer::describeAnalysisResult(
+		const KymoKnotAnalysisResult& result,
+		const std::vector<Vector3r>* points)
+	{
+		if (!result.available)
+			return result.message;
+		if (result.segments.empty())
+			return "unrecognized";
+		if (isUnknotResult(result))
+			return "unknot";
+		return describeSegments(result.segments, points);
 	}
 }

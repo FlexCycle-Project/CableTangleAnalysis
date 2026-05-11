@@ -159,25 +159,29 @@ void MiniGL::drawCylinder(const Vector3r &a, const Vector3r &b, const float *col
 	glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 100.0);
 	glColor3fv(color);
 
-	Real vx = (b.x() - a.x());
-	Real vy = (b.y() - a.y());
-	Real vz = (b.z() - a.z());
-	//handle the degenerate case with an approximation
-	if (vz == 0)
-		vz = .00000001;
-	Real v = sqrt(vx*vx + vy*vy + vz*vz);
-	Real ax = static_cast<Real>(57.2957795)*acos(vz / v);
-	if (vz < 0.0)
-		ax = -ax;
-	Real rx = -vy*vz;
-	Real ry = vx*vz;
+	const Vector3r delta = b - a;
+	const Real v = delta.norm();
+	if (v <= static_cast<Real>(1e-12))
+		return;
+
+	const Vector3r dir = delta / v;
+	const Quaternionr rotation =
+		Quaternionr::FromTwoVectors(Vector3r(0.0, 0.0, 1.0), dir);
+	const Matrix3r rot = rotation.toRotationMatrix();
+	GLdouble mat[16] =
+	{
+		static_cast<GLdouble>(rot(0, 0)), static_cast<GLdouble>(rot(1, 0)), static_cast<GLdouble>(rot(2, 0)), 0.0,
+		static_cast<GLdouble>(rot(0, 1)), static_cast<GLdouble>(rot(1, 1)), static_cast<GLdouble>(rot(2, 1)), 0.0,
+		static_cast<GLdouble>(rot(0, 2)), static_cast<GLdouble>(rot(1, 2)), static_cast<GLdouble>(rot(2, 2)), 0.0,
+		0.0, 0.0, 0.0, 1.0
+	};
 
 	GLUquadricObj *quadric = gluNewQuadric();
 	gluQuadricNormals(quadric, GLU_SMOOTH);
 
 	glPushMatrix();
 	glTranslatef((float)a.x(), (float)a.y(), (float)a.z());
-	glRotatef((float)ax, (float)rx, (float)ry, 0.0f);
+	glMultMatrixd(mat);
 	//draw the cylinder
 	gluCylinder(quadric, radius, radius, v, subdivisions, 1);
 	gluQuadricOrientation(quadric, GLU_INSIDE);

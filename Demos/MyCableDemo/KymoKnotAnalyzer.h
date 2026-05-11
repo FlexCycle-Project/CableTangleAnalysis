@@ -30,13 +30,27 @@ namespace PBD
 		std::vector<KymoKnotSegment> segments;
 	};
 
+	struct CableGeometry
+	{
+		std::vector<Vector3r> points;
+	};
+
 	class KymoKnotAnalyzer
 	{
 	public:
+		static KymoKnotAnalysisResult analyze(
+			const CableGeometry& cable,
+			KymoKnotSearchMode searchMode = KymoKnotSearchMode::TopDown);
+
 		static KymoKnotAnalysisResult analyzeLinear(
 			const std::vector<Vector3r>& points,
-			const std::string& bridgeRoot,
 			KymoKnotSearchMode searchMode = KymoKnotSearchMode::TopDown);
+
+		static bool isUnknotResult(const KymoKnotAnalysisResult& result);
+
+		static std::string describeAnalysisResult(
+			const KymoKnotAnalysisResult& result,
+			const std::vector<Vector3r>* points = nullptr);
 	};
 }
 
