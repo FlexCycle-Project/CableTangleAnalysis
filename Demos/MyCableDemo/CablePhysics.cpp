@@ -58,19 +58,25 @@ Real clamp01(Real x)
     return x;
 }
 
-static Real getInverseMass(const ParticleData& pd, unsigned int index)
-{
-    return (pd.getMass(index) > 0.0)
-        ? static_cast<Real>(1.0) / pd.getMass(index)
-        : static_cast<Real>(0.0);
-}
-
 static Vector3r clampVec(const Vector3r& v, Real maxNorm)
 {
     const Real len = v.norm();
     if (len > maxNorm && len > static_cast<Real>(1e-12))
         return v * (maxNorm / len);
     return v;
+}
+
+static Vector3r computeSpringDampedAcceleration(
+    const Vector3r& springTerm,
+    const Vector3r& currentVelocity,
+    Real damping,
+    Real maxAccel)
+{
+    Vector3r acceleration = springTerm - damping * currentVelocity;
+    const Real accelNorm = acceleration.norm();
+    if (accelNorm > maxAccel)
+        acceleration *= (maxAccel / accelNorm);
+    return acceleration;
 }
 
 static uint64_t makeOrderedEdgePairKey(unsigned int a, unsigned int b)
@@ -160,24 +166,225 @@ void recomputeVelocitiesFromPositions(
 
     for (unsigned int i = 0; i < n; ++i)
     {
-        if (pd.getMass(i) <= 0.0)
-            continue;
-
         const Vector3r vPos = (pd.getPosition(i) - oldPositions[i]) / dt;
         Vector3r& v = pd.getVelocity(i);
         v = (static_cast<Real>(1.0) - blend) * v + blend * vPos;
     }
 }
 
-static std::vector<CableEdgeRef> collectCableEdges(const ParticleData& pd)
+void addCableModel(
+    SimulationModel* model,
+    std::vector<Vector3r>& ropePoints,
+    const RopeConfig& ropeCfg)
+{
+    addCableModel(model, ropePoints, ropeCfg, nullptr);
+}
+
+void addCableModel(
+    SimulationModel* model,
+    std::vector<Vector3r>& ropePoints,
+    const RopeConfig& ropeCfg,
+    std::pair<unsigned int, unsigned int>* particleRangeOut)
+{
+    if (model == nullptr)
+        return;
+
+    const int particleCount = static_cast<int>(ropePoints.size());
+    const int quaternionCount = particleCount - 1;
+
+    std::vector<Quaternionr> quaternions(quaternionCount);
+    Vector3r previousDirection(0, 0, 1);
+    for (int i = 0; i < quaternionCount; ++i)
+    {
+        const Vector3r edge = ropePoints[i + 1] - ropePoints[i];
+        Vector3r currentDirection;
+
+        if (edge.squaredNorm() > static_cast<Real>(1e-12))
+            currentDirection = edge.normalized();
+        else
+            currentDirection = previousDirection;
+
+        const Quaternionr rotation =
+            Quaternionr::FromTwoVectors(previousDirection, currentDirection);
+        quaternions[i] = (i == 0) ? rotation : rotation * quaternions[i - 1];
+        previousDirection = currentDirection;
+    }
+
+    std::vector<unsigned int> pointIndices(2 * particleCount - 2);
+    std::vector<unsigned int> quatIndices(quaternionCount);
+    for (int i = 0; i < particleCount - 1; ++i)
+    {
+        pointIndices[2 * i] = static_cast<unsigned int>(i);
+        pointIndices[2 * i + 1] = static_cast<unsigned int>(i + 1);
+    }
+    for (int i = 0; i < quaternionCount; ++i)
+        quatIndices[i] = static_cast<unsigned int>(i);
+
+    const size_t firstConstraintIndex = model->getConstraints().size();
+
+    model->addLineModel(
+        static_cast<unsigned int>(particleCount),
+        static_cast<unsigned int>(quaternionCount),
+        ropePoints.data(),
+        quaternions.data(),
+        pointIndices.data(),
+        quatIndices.data());
+
+    ParticleData& particles = model->getParticles();
+    const unsigned int firstParticle =
+        particles.getNumberOfParticles() - static_cast<unsigned int>(particleCount);
+    const unsigned int lastParticle = particles.getNumberOfParticles() - 1;
+
+    if (particleRangeOut != nullptr)
+        *particleRangeOut = std::make_pair(firstParticle, lastParticle);
+
+    LineModel* lineModel = model->getLineModels().back();
+    const unsigned int pointOffset = lineModel->getIndexOffset();
+    const unsigned int quatOffset = lineModel->getIndexOffsetQuaternions();
+    const LineModel::Edges& edges = lineModel->getEdges();
+
+    for (unsigned int i = 0; i < edges.size(); ++i)
+    {
+        const unsigned int p0 = edges[i].m_vert[0] + pointOffset;
+        const unsigned int p1 = edges[i].m_vert[1] + pointOffset;
+        const unsigned int q = edges[i].m_quat + quatOffset;
+
+        model->addStretchShearConstraint(
+            p0,
+            p1,
+            q,
+            ropeCfg.stretchStiffness,
+            ropeCfg.shearStiffnessX,
+            ropeCfg.shearStiffnessY);
+    }
+
+    for (unsigned int i = 0; i + 1 < edges.size(); ++i)
+    {
+        const unsigned int q0 = edges[i].m_quat + quatOffset;
+        const unsigned int q1 = edges[i + 1].m_quat + quatOffset;
+
+        model->addBendTwistConstraint(
+            q0,
+            q1,
+            ropeCfg.twistStiffness,
+            ropeCfg.bendStiffnessX,
+            ropeCfg.bendStiffnessY);
+    }
+
+    setNewCableBendTwistRestStateToStraight(model, firstConstraintIndex);
+}
+
+void setNewCableBendTwistRestStateToStraight(
+    SimulationModel* model,
+    size_t firstConstraintIndex)
+{
+    if (model == nullptr)
+        return;
+
+    const SimulationModel::ConstraintVector& constraints = model->getConstraints();
+    for (size_t i = firstConstraintIndex; i < constraints.size(); ++i)
+    {
+        Constraint* constraint = constraints[i];
+        if (constraint == nullptr ||
+            constraint->getTypeId() != BendTwistConstraint::TYPE_ID)
+        {
+            continue;
+        }
+
+        BendTwistConstraint* bendTwist =
+            static_cast<BendTwistConstraint*>(constraint);
+        bendTwist->m_restDarbouxVector =
+            Quaternionr(static_cast<Real>(1.0), static_cast<Real>(0.0), static_cast<Real>(0.0), static_cast<Real>(0.0));
+    }
+}
+
+void applyMouseDragForces(
+    SimulationModel* model,
+    Real dt,
+    const MouseDragState& dragState,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
+    const RopeConfig& ropeCfg,
+    Real spring,
+    Real damping,
+    Real maxAccel)
+{
+    if (!dragState.active || model == nullptr)
+        return;
+    if (dragState.pieceIndex >= pieceRanges.size())
+        return;
+
+    const std::pair<unsigned int, unsigned int> range =
+        pieceRanges[dragState.pieceIndex];
+
+    if (range.second <= range.first)
+        return;
+
+    const unsigned int localEdgeIndex = static_cast<unsigned int>(dragState.edgeIndex);
+    const unsigned int i0 = range.first + localEdgeIndex;
+    const unsigned int i1 = i0 + 1;
+
+    ParticleData& particles = model->getParticles();
+    if (i1 >= particles.getNumberOfParticles())
+        return;
+
+    const Real w0 = static_cast<Real>(1.0) - dragState.edgeT;
+    const Real w1 = dragState.edgeT;
+
+    const Vector3r p0 = particles.getPosition(i0);
+    const Vector3r p1 = particles.getPosition(i1);
+    const Vector3r v0 = particles.getVelocity(i0);
+    const Vector3r v1 = particles.getVelocity(i1);
+
+    const Vector3r currentPoint = w0 * p0 + w1 * p1;
+    const Vector3r currentVelocity = w0 * v0 + w1 * v1;
+    Vector3r targetPoint = dragState.targetPoint;
+    if (dragState.upwardPull)
+        targetPoint.y() = std::max(targetPoint.y(), currentPoint.y() + static_cast<Real>(0.1));
+
+    const Vector3r acceleration = computeSpringDampedAcceleration(
+        spring * (targetPoint - currentPoint),
+        currentVelocity,
+        damping,
+        maxAccel);
+
+    (void)ropeCfg;
+
+    particles.getVelocity(i0) += dt * w0 * acceleration;
+    particles.getVelocity(i1) += dt * w1 * acceleration;
+}
+
+void applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY)
+{
+    if (model == nullptr)
+        return;
+
+    PBD::ParticleData& particles = model->getParticles();
+    for (unsigned int i = 0; i < particles.getNumberOfParticles(); ++i)
+    {
+        Vector3r p = particles.getPosition(i);
+        if (p.y() < groundY)
+        {
+            p.y() = groundY;
+            particles.setPosition(i, p);
+
+            Vector3r& v = particles.getVelocity(i);
+            if (v.y() < 0.0)
+                v.y() = 0.0;
+        }
+    }
+}
+
+static std::vector<CableEdgeRef> collectCableEdges(
+    const ParticleData& pd,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges)
 {
     std::vector<CableEdgeRef> edges;
-    if (g_cablePieceRanges.empty())
+    if (pieceRanges.empty())
         return edges;
 
-    for (size_t pieceIndex = 0; pieceIndex < g_cablePieceRanges.size(); ++pieceIndex)
+    for (size_t pieceIndex = 0; pieceIndex < pieceRanges.size(); ++pieceIndex)
     {
-        const std::pair<unsigned int, unsigned int>& range = g_cablePieceRanges[pieceIndex];
+        const std::pair<unsigned int, unsigned int>& range = pieceRanges[pieceIndex];
         if (range.second <= range.first)
             continue;
         if (range.second >= pd.getNumberOfParticles())
@@ -285,13 +492,47 @@ collectSelfCollisionCandidatesSpatialHash(
 
 void applyBendTwistRestStateCreep(
     SimulationModel* model,
-    const RestShapeCreepConfig& creepCfg)
+    const RestShapeCreepConfig& creepCfg,
+    unsigned int& creepCounter)
 {
     if (!creepCfg.enabled || model == nullptr)
         return;
 
-    g_restCreepCounter++;
-    if (creepCfg.stepInterval == 0 || (g_restCreepCounter % creepCfg.stepInterval) != 0)
+    creepCounter++;
+    if (creepCounter < creepCfg.activationDelaySteps)
+        return;
+    if (creepCounter == creepCfg.activationDelaySteps)
+    {
+        OrientationData& orientations = model->getOrientations();
+        SimulationModel::ConstraintVector& constraints = model->getConstraints();
+
+        for (Constraint* constraint : constraints)
+        {
+            if (constraint == nullptr || constraint->getTypeId() != BendTwistConstraint::TYPE_ID)
+                continue;
+
+            BendTwistConstraint* bendTwist = static_cast<BendTwistConstraint*>(constraint);
+            const unsigned int q0Index = bendTwist->m_bodies[0];
+            const unsigned int q1Index = bendTwist->m_bodies[1];
+            if (q0Index >= orientations.getNumberOfQuaternions() ||
+                q1Index >= orientations.getNumberOfQuaternions())
+            {
+                continue;
+            }
+
+            Quaternionr currentRelative =
+                orientations.getQuaternion(q0Index).conjugate() *
+                orientations.getQuaternion(q1Index);
+            currentRelative.normalize();
+            if (bendTwist->m_restDarbouxVector.dot(currentRelative) < static_cast<Real>(0.0))
+                currentRelative.coeffs() *= static_cast<Real>(-1.0);
+
+            bendTwist->m_restDarbouxVector = currentRelative;
+        }
+
+        return;
+    }
+    if (creepCfg.stepInterval == 0 || (creepCounter % creepCfg.stepInterval) != 0)
         return;
 
     OrientationData& orientations = model->getOrientations();
@@ -332,10 +573,15 @@ void applyBendTwistRestStateCreep(
         const Real norm = blendedCoeffs.norm();
         if (norm > static_cast<Real>(1e-12))
             restRelative.coeffs() = blendedCoeffs / norm;
+
     }
 }
 
-void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig& physicsCfg)
+void applyPullForces(
+    SimulationModel* model,
+    Real dt,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
+    const PhysicsConfig& physicsCfg)
 {
     ParticleData& particles = model->getParticles();
 
@@ -343,22 +589,17 @@ void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig& physi
     {
         if (particleIndex >= particles.getNumberOfParticles())
             return;
-        if (particles.getMass(particleIndex) <= 0.0)
-            return;
-
         Vector3r& velocity = particles.getVelocity(particleIndex);
-        Vector3r acceleration =
-            physicsCfg.pullSpring * direction -
-            physicsCfg.pullDamping * velocity;
-
-        const Real accelNorm = acceleration.norm();
-        if (accelNorm > physicsCfg.pullMaxAccel)
-            acceleration *= (physicsCfg.pullMaxAccel / accelNorm);
+        const Vector3r acceleration = computeSpringDampedAcceleration(
+            physicsCfg.pullSpring * direction,
+            velocity,
+            physicsCfg.pullDamping,
+            physicsCfg.pullMaxAccel);
 
         velocity += dt * acceleration;
     };
 
-    for (const std::pair<unsigned int, unsigned int>& range : g_cablePieceRanges)
+    for (const std::pair<unsigned int, unsigned int>& range : pieceRanges)
     {
         const unsigned int firstParticle = range.first;
         const unsigned int lastParticle = range.second;
@@ -369,48 +610,30 @@ void applyPullForces(SimulationModel* model, Real dt, const PhysicsConfig& physi
             continue;
         }
 
-        Vector3r startDirection = particles.getPosition(firstParticle) -
-            particles.getPosition(firstParticle + 1);
-        Vector3r endDirection = particles.getPosition(lastParticle) -
-            particles.getPosition(lastParticle - 1);
-
-        if (startDirection.squaredNorm() > static_cast<Real>(1e-12))
-            startDirection.normalize();
-        else
-            startDirection.setZero();
-
-        if (endDirection.squaredNorm() > static_cast<Real>(1e-12))
-            endDirection.normalize();
-        else
-            endDirection.setZero();
-
-        pullOneParticle(firstParticle, startDirection);
-        pullOneParticle(lastParticle, endDirection);
-    }
-}
-
-void applyGroundConstraint(Real groundY)
-{
-    SimulationModel* model = Simulation::getCurrent()->getModel();
-    ParticleData& particles = model->getParticles();
-
-    for (unsigned int i = 0; i < particles.getNumberOfParticles(); ++i)
-    {
-        Vector3r p = particles.getPosition(i);
-        if (p.y() < groundY)
+        if (physicsCfg.pullLeftScale > static_cast<Real>(0.0))
         {
-            p.y() = groundY;
-            particles.setPosition(i, p);
-
-            Vector3r& v = particles.getVelocity(i);
-            if (v.y() < 0.0)
-                v.y() = 0.0;
+            pullOneParticle(
+                firstParticle,
+                Vector3r(
+                    -physicsCfg.pullLeftScale,
+                    static_cast<Real>(0.0),
+                    static_cast<Real>(0.0)));
+        }
+        if (physicsCfg.pullRightScale > static_cast<Real>(0.0))
+        {
+            pullOneParticle(
+                lastParticle,
+                Vector3r(
+                    physicsCfg.pullRightScale,
+                    static_cast<Real>(0.0),
+                    static_cast<Real>(0.0)));
         }
     }
 }
 
 std::vector<SelfCollisionContact> detectSelfCollisionContacts(
     SimulationModel* model,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg)
 {
@@ -425,7 +648,7 @@ std::vector<SelfCollisionContact> detectSelfCollisionContacts(
 
     const Real minDist = static_cast<Real>(2.0) * collisionCfg.ropeRadius;
     const Real eps = static_cast<Real>(1e-8);
-    const std::vector<CableEdgeRef> edgeRefs = collectCableEdges(pd);
+    const std::vector<CableEdgeRef> edgeRefs = collectCableEdges(pd, pieceRanges);
     const std::vector<std::pair<unsigned int, unsigned int>> candidates =
         collectSelfCollisionCandidatesSpatialHash(
             pd,
@@ -461,9 +684,10 @@ std::vector<SelfCollisionContact> detectSelfCollisionContacts(
     return contacts;
 }
 
-void applySelfCollisionXPBD(
+void applySelfCollision(
     SimulationModel* model,
     Real dt,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg)
 {
@@ -494,7 +718,7 @@ void applySelfCollisionXPBD(
     velocityCorrections.clear();
     velocityCorrections.reserve(n * 2);
 
-    const std::vector<CableEdgeRef> edgeRefs = collectCableEdges(pd);
+    const std::vector<CableEdgeRef> edgeRefs = collectCableEdges(pd, pieceRanges);
     const std::vector<std::pair<unsigned int, unsigned int>> candidates =
         collectSelfCollisionCandidatesSpatialHash(
             pd,
@@ -553,62 +777,42 @@ void applySelfCollisionXPBD(
         const Real wQ0 = static_cast<Real>(1.0) - t;
         const Real wQ1 = t;
 
-        const Real invMassP0 = getInverseMass(pd, i0);
-        const Real invMassP1 = getInverseMass(pd, i1);
-        const Real invMassQ0 = getInverseMass(pd, j0);
-        const Real invMassQ1 = getInverseMass(pd, j1);
-
-        if (invMassP0 + invMassP1 + invMassQ0 + invMassQ1 <= eps)
-            continue;
-
         const Vector3r gradP0 = -wP0 * nrm;
         const Vector3r gradP1 = -wP1 * nrm;
         const Vector3r gradQ0 = wQ0 * nrm;
         const Vector3r gradQ1 = wQ1 * nrm;
 
         const Real denom =
-            invMassP0 * gradP0.squaredNorm() +
-            invMassP1 * gradP1.squaredNorm() +
-            invMassQ0 * gradQ0.squaredNorm() +
-            invMassQ1 * gradQ1.squaredNorm() +
+            gradP0.squaredNorm() +
+            gradP1.squaredNorm() +
+            gradQ0.squaredNorm() +
+            gradQ1.squaredNorm() +
             alpha;
         if (denom <= eps)
             continue;
 
         const Real deltaLambda = -C / denom;
 
-        Vector3r dp0 = clampVec(invMassP0 * deltaLambda * gradP0, collisionCfg.maxCorrection);
-        Vector3r dp1 = clampVec(invMassP1 * deltaLambda * gradP1, collisionCfg.maxCorrection);
-        Vector3r dq0 = clampVec(invMassQ0 * deltaLambda * gradQ0, collisionCfg.maxCorrection);
-        Vector3r dq1 = clampVec(invMassQ1 * deltaLambda * gradQ1, collisionCfg.maxCorrection);
+        Vector3r dp0 = clampVec(deltaLambda * gradP0, collisionCfg.maxCorrection);
+        Vector3r dp1 = clampVec(deltaLambda * gradP1, collisionCfg.maxCorrection);
+        Vector3r dq0 = clampVec(deltaLambda * gradQ0, collisionCfg.maxCorrection);
+        Vector3r dq1 = clampVec(deltaLambda * gradQ1, collisionCfg.maxCorrection);
 
-        if (invMassP0 > 0.0)
-        {
-            posDelta[i0] += dp0;
-            contactCount[i0] += 1;
-        }
-        if (invMassP1 > 0.0)
-        {
-            posDelta[i1] += dp1;
-            contactCount[i1] += 1;
-        }
-        if (invMassQ0 > 0.0)
-        {
-            posDelta[j0] += dq0;
-            contactCount[j0] += 1;
-        }
-        if (invMassQ1 > 0.0)
-        {
-            posDelta[j1] += dq1;
-            contactCount[j1] += 1;
-        }
+        posDelta[i0] += dp0;
+        contactCount[i0] += 1;
+        posDelta[i1] += dp1;
+        contactCount[i1] += 1;
+        posDelta[j0] += dq0;
+        contactCount[j0] += 1;
+        posDelta[j1] += dq1;
+        contactCount[j1] += 1;
 
         velocityCorrections.push_back({ i0, i1, j0, j1, wP0, wP1, wQ0, wQ1, nrm });
     }
 
     for (unsigned int i = 0; i < n; ++i)
     {
-        if (pd.getMass(i) <= 0.0 || contactCount[i] == 0)
+        if (contactCount[i] == 0)
             continue;
 
         const Real averageScale =
@@ -619,14 +823,6 @@ void applySelfCollisionXPBD(
 
     for (const auto& vc : velocityCorrections)
     {
-        const Real invMassP0 = getInverseMass(pd, vc.i0);
-        const Real invMassP1 = getInverseMass(pd, vc.i1);
-        const Real invMassQ0 = getInverseMass(pd, vc.j0);
-        const Real invMassQ1 = getInverseMass(pd, vc.j1);
-
-        if (invMassP0 + invMassP1 + invMassQ0 + invMassQ1 <= eps)
-            continue;
-
         const Vector3r vP =
             vc.wP0 * pd.getVelocity(vc.i0) +
             vc.wP1 * pd.getVelocity(vc.i1);
@@ -639,17 +835,21 @@ void applySelfCollisionXPBD(
 
         auto applyImpulse = [&](const Vector3r& impulse)
         {
-            if (invMassP0 > 0.0) pd.getVelocity(vc.i0) -= (vc.wP0 * invMassP0) * impulse;
-            if (invMassP1 > 0.0) pd.getVelocity(vc.i1) -= (vc.wP1 * invMassP1) * impulse;
-            if (invMassQ0 > 0.0) pd.getVelocity(vc.j0) += (vc.wQ0 * invMassQ0) * impulse;
-            if (invMassQ1 > 0.0) pd.getVelocity(vc.j1) += (vc.wQ1 * invMassQ1) * impulse;
+            pd.getVelocity(vc.i0) -= vc.wP0 * impulse;
+            pd.getVelocity(vc.i1) -= vc.wP1 * impulse;
+            pd.getVelocity(vc.j0) += vc.wQ0 * impulse;
+            pd.getVelocity(vc.j1) += vc.wQ1 * impulse;
         };
 
         if (vn < static_cast<Real>(0.0) && collisionCfg.normalDamping > static_cast<Real>(0.0))
             applyImpulse(-collisionCfg.normalDamping * vn * vc.nrm);
 
         const Vector3r vt = relV - relV.dot(vc.nrm) * vc.nrm;
-        if (vt.squaredNorm() > eps && collisionCfg.tangentialDamping > static_cast<Real>(0.0))
-            applyImpulse(-collisionCfg.tangentialDamping * vt);
+        const Real vtNorm = vt.norm();
+        if (vtNorm > eps)
+        {
+            if (collisionCfg.tangentialDamping > static_cast<Real>(0.0))
+                applyImpulse(-collisionCfg.tangentialDamping * vt);
+        }
     }
 }

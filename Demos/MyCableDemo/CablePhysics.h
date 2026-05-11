@@ -3,6 +3,7 @@
 
 #include "Common/Common.h"
 
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,20 +32,23 @@ struct PhysicsConfig
     Real pullDamping = static_cast<Real>(2.0);
     Real pullMaxAccel = static_cast<Real>(1000.0);
     Real velocityRecomputeBlend = static_cast<Real>(0.03);
+    Real pullLeftScale = static_cast<Real>(1.0);
+    Real pullRightScale = static_cast<Real>(1.0);
 };
 
 struct RestShapeCreepConfig
 {
     bool enabled = true;
+    unsigned int activationDelaySteps = 600;
     unsigned int stepInterval = 20;
     Real creep = static_cast<Real>(0.02);
-    Real activationThreshold = static_cast<Real>(1e-4);
+    Real activationThreshold = static_cast<Real>(1e-2);
 };
 
 struct CableLayoutConfig
 {
     Real endpointX = static_cast<Real>(10.0);
-    Real height = static_cast<Real>(6.0);
+    Real height = static_cast<Real>(2.0);
 };
 
 struct RandomCableConfig
@@ -58,9 +62,9 @@ struct RandomCableConfig
     Real rightChance = static_cast<Real>(0.5);
     Real centerPull = static_cast<Real>(0.15);
     Real maxLateralOffset = static_cast<Real>(4.5);
-    int smoothingIterations = 3;
-    Real smoothingAlpha = static_cast<Real>(0.12);
-    Real minHeightAboveGround = static_cast<Real>(5.0);
+    int smoothingIterations = 0;
+    Real smoothingAlpha = static_cast<Real>(0.3);
+    Real minHeightAboveGround = static_cast<Real>(2.0);
 };
 
 struct SelfCollisionConfig
@@ -69,7 +73,7 @@ struct SelfCollisionConfig
     Real ropeRadius = static_cast<Real>(0.08);
     Real compliance = static_cast<Real>(1e-10);
     unsigned int iterations = 8;
-    Real excludeArcLength = static_cast<Real>(0.9);
+    Real excludeArcLength = static_cast<Real>(0.25);
     Real normalDamping = static_cast<Real>(0.15);
     Real tangentialDamping = static_cast<Real>(0.05);
     Real maxCorrection = static_cast<Real>(0.08);
@@ -93,9 +97,20 @@ struct SelfCollisionContact
     unsigned int edgeB;
 };
 
-extern unsigned int g_restCreepCounter;
+struct MouseDragState
+{
+    bool selected = false;
+    bool active = false;
+    bool upwardPull = false;
+    size_t pieceIndex = std::numeric_limits<size_t>::max();
+    size_t edgeIndex = std::numeric_limits<size_t>::max();
+    Real edgeT = static_cast<Real>(0.0);
+    Real rayDepthT = static_cast<Real>(0.0);
+    Vector3r grabbedPoint = Vector3r::Zero();
+    Vector3r targetPoint = Vector3r::Zero();
+};
+
 extern bool g_pullEnabled;
-extern std::vector<std::pair<unsigned int, unsigned int>> g_cablePieceRanges;
 
 Real clamp01(Real x);
 void closestPtSegmentSegment(
@@ -108,19 +123,47 @@ void recomputeVelocitiesFromPositions(
     const std::vector<Vector3r>& oldPositions,
     Real dt,
     Real blend);
-void applyGroundConstraint(Real groundY);
-void applyPullForces(PBD::SimulationModel* model, Real dt, const PhysicsConfig& physicsCfg);
-void applySelfCollisionXPBD(
+void addCableModel(
+    PBD::SimulationModel* model,
+    std::vector<Vector3r>& ropePoints,
+    const RopeConfig& ropeCfg);
+void addCableModel(
+    PBD::SimulationModel* model,
+    std::vector<Vector3r>& ropePoints,
+    const RopeConfig& ropeCfg,
+    std::pair<unsigned int, unsigned int>* particleRangeOut);
+void setNewCableBendTwistRestStateToStraight(
+    PBD::SimulationModel* model,
+    size_t firstConstraintIndex);
+void applyMouseDragForces(
     PBD::SimulationModel* model,
     Real dt,
+    const MouseDragState& dragState,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
+    const RopeConfig& ropeCfg,
+    Real spring,
+    Real damping,
+    Real maxAccel);
+void applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY);
+void applyPullForces(
+    PBD::SimulationModel* model,
+    Real dt,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
+    const PhysicsConfig& physicsCfg);
+void applySelfCollision(
+    PBD::SimulationModel* model,
+    Real dt,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg);
 std::vector<SelfCollisionContact> detectSelfCollisionContacts(
     PBD::SimulationModel* model,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg);
 void applyBendTwistRestStateCreep(
     PBD::SimulationModel* model,
-    const RestShapeCreepConfig& creepCfg);
+    const RestShapeCreepConfig& creepCfg,
+    unsigned int& creepCounter);
 
 #endif
