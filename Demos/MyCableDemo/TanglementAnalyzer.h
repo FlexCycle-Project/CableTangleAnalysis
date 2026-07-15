@@ -5,6 +5,7 @@
 #include "CablePhysics.h"
 #include "KymoKnotAnalyzer.h"
 
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,6 +24,7 @@ public:
     {
         Real order = static_cast<Real>(0.0);
         size_t pieceIndex = 0;
+        size_t otherPieceIndex = 0;
         int firstEdge = -1;
         int secondEdge = -1;
         Real heightDelta = static_cast<Real>(0.0);
@@ -41,10 +43,31 @@ public:
     {
         size_t pieceCount = 0;
         size_t totalPointCount = 0;
+        size_t totalSegmentCount = 0;
         size_t selfCollisionCount = 0;
         Real knotSpanFraction = static_cast<Real>(0.0);
         int gravityCrossings = 0;
         size_t contactParticipationCount = 0;
+        Real entanglementScore = static_cast<Real>(0.0);
+        Real proximityScore = static_cast<Real>(0.0);
+        Real crossPieceProximityScore = static_cast<Real>(0.0);
+        Real samePieceProximityScore = static_cast<Real>(0.0);
+        Real clusterPenalty = static_cast<Real>(0.0);
+        Real minimumPairDistance = std::numeric_limits<Real>::infinity();
+        size_t closePairCount = 0;
+        size_t samePieceClosePairCount = 0;
+        size_t crossPieceClosePairCount = 0;
+        size_t closeSegmentCount = 0;
+        size_t entangledComponentCount = 0;
+        size_t multiPieceComponentCount = 0;
+    };
+
+    struct ThreadingMetricsSnapshot
+    {
+        size_t threadedHoopCount = 0;
+        int totalThreadingCount = 0;
+        int maxHoopScore = 0;
+        Real averageHoopScore = static_cast<Real>(0.0);
     };
 
     struct TanglementAnalysisResult
@@ -58,17 +81,40 @@ public:
         std::vector<std::vector<HoopCandidate>> scoredHoops;
         std::vector<std::vector<int>> problematicHoopMiddleEdges;
         std::vector<std::vector<int>> targetHoopMiddleEdges;
+        std::vector<std::vector<Real>> segmentScores;
         TanglementMetricsSnapshot metrics;
     };
 
     static TanglementAnalysisResult analyzeTanglement(
         const std::vector<std::vector<Vector3r>>& ropePieces,
         const std::vector<SelfCollisionContact>& contacts,
+        const RopeConfig& ropeCfg,
+        const SelfCollisionConfig& collisionCfg,
         PBD::KymoKnotSearchMode searchMode);
+
+    static TanglementAnalysisResult analyzeTanglementGeometryOnly(
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        const std::vector<SelfCollisionContact>& contacts,
+        const RopeConfig& ropeCfg,
+        const SelfCollisionConfig& collisionCfg);
+
+    static TanglementMetricsSnapshot evaluateContinuousEntanglementMetrics(
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        const std::vector<SelfCollisionContact>& contacts,
+        const RopeConfig& ropeCfg,
+        const SelfCollisionConfig& collisionCfg);
+
+    static ThreadingMetricsSnapshot computeThreadingMetrics(
+        const TanglementAnalysisResult& result);
 
     static void printTanglementReport(
         const std::vector<std::vector<Vector3r>>& ropePieces,
         const TanglementAnalysisResult& result);
+
+    static void printHoopScoreHitLists(
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        size_t sourcePieceIndex,
+        const HoopCandidate& sourceHoop);
 
 };
 

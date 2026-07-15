@@ -4,6 +4,7 @@
 #include "Simulation/SimulationModel.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace CableVisualization
 {
@@ -62,9 +63,26 @@ namespace CableVisualization
           static float kYellowColor[4] = {1.0f, 0.95f, 0.20f, 1.0f};
           static float kCyanColor[4] = {0.20f, 0.95f, 1.00f, 1.0f};
           static float kGrayColor[4] = {0.35f, 0.35f, 0.35f, 1.0f};
-          static float kBlackColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-          static float kWhiteColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-          static float kPurpleColor[4] = {0.72f, 0.34f, 0.95f, 1.0f};
+        static float kBlackColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        static float kWhiteColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        static float kPurpleColor[4] = {0.72f, 0.34f, 0.95f, 1.0f};
+
+        static void setGrayscaleColor(Real t, float outColor[4])
+        {
+            const Real clampedT = std::max(static_cast<Real>(0.0), std::min(static_cast<Real>(1.0), t));
+            const float grayscale = static_cast<float>(1.0 - clampedT);
+            outColor[0] = grayscale;
+            outColor[1] = grayscale;
+            outColor[2] = grayscale;
+            outColor[3] = 1.0f;
+        }
+
+        static float* grayscaleColorFromValue(Real t)
+        {
+            static float color[4];
+            setGrayscaleColor(t, color);
+            return color;
+        }
 
         static bool isLocalIndexInKnotRegion(
             int localIndex,
@@ -132,6 +150,7 @@ namespace CableVisualization
             scoredHoops.clear();
             problematicHoopMiddleEdges.clear();
             targetHoopMiddleEdges.clear();
+            segmentScores.clear();
     }
 
     VisualizationState buildVisualizationState(
@@ -144,6 +163,7 @@ namespace CableVisualization
         state.scoredHoops = tanglement.scoredHoops;
         state.problematicHoopMiddleEdges = tanglement.problematicHoopMiddleEdges;
         state.targetHoopMiddleEdges = tanglement.targetHoopMiddleEdges;
+        state.segmentScores = tanglement.segmentScores;
 
         for (size_t pieceIndex = 0; pieceIndex < tanglement.kymoResults.size(); ++pieceIndex)
         {
@@ -161,7 +181,8 @@ namespace CableVisualization
         const RopeConfig& ropeCfg,
         const HighlightSelection& selection,
         const HoopMarkerSelection& hoopSelection,
-        const VisualizationState& state)
+        const VisualizationState& state,
+        bool showSegmentScores)
     {
         if (model == nullptr)
             return;
@@ -249,7 +270,7 @@ namespace CableVisualization
                         highlightGrayHoop = true;
                     }
                 }
-                  const bool highlightTarget =
+                const bool highlightTarget =
                     isLocalEdgeInHighlight(state.targetHoopMiddleEdges, m, localEdgeIndex);
                 const bool highlightSelected =
                     selection.selected &&
@@ -263,25 +284,68 @@ namespace CableVisualization
                     activeColor = kGreenColor;
                     sphereColor = kGreenColor;
                 }
-                if (highlightKnot)
-                {
-                    activeColor = kRedColor;
-                    sphereColor = kRedColor;
-                }
-                  if (highlightGrayHoop)
-                  {
-                      activeColor = kGrayColor;
-                      sphereColor = kGrayColor;
-                  }
-                  if (highlightSelectedHoop)
-                  {
-                      activeColor = kWhiteColor;
-                      sphereColor = kWhiteColor;
-                  }
+                // if (highlightKnot)
+                // {
+                //     activeColor = kRedColor;
+                //     sphereColor = kRedColor;
+                // }
+                // if (highlightGrayHoop)
+                // {
+                //     activeColor = kGrayColor;
+                //     sphereColor = kGrayColor;
+                // }
+                // if (highlightSelectedHoop)
+                // {
+                //     activeColor = kWhiteColor;
+                //     sphereColor = kWhiteColor;
+                // }
                 if (highlightSelected)
                 {
                     activeColor = kWhiteColor;
                     sphereColor = kWhiteColor;
+                }
+
+                if (hoopSelection.selected &&
+                    m == hoopSelection.pieceIndex &&
+                    m < state.scoredHoops.size() &&
+                    hoopSelection.hoopIndex < state.scoredHoops[m].size())
+                {
+                    const TanglementAnalyzer::HoopCandidate& selectedHoop =
+                        state.scoredHoops[m][hoopSelection.hoopIndex];
+                    const int selectedHoopStart = std::max(0, std::min(selectedHoop.startEdge, selectedHoop.endEdge));
+                    const int selectedHoopEnd = std::min(
+                        static_cast<int>(lineModel->getEdges().size()) - 1,
+                        std::max(selectedHoop.startEdge, selectedHoop.endEdge));
+                    if (localEdgeIndex >= selectedHoopStart &&
+                        localEdgeIndex <= selectedHoopEnd)
+                    {
+                        activeColor = kWhiteColor;
+                        sphereColor = kWhiteColor;
+                    }
+                }
+
+                float* scoreColor = nullptr;
+                if (showSegmentScores &&
+                    m < state.segmentScores.size() &&
+                    static_cast<size_t>(localEdgeIndex) < state.segmentScores[m].size())
+                {
+                    const std::vector<Real>& pieceSegmentScores = state.segmentScores[m];
+                    const auto minmaxScores = std::minmax_element(
+                        pieceSegmentScores.begin(),
+                        pieceSegmentScores.end());
+                    const Real minScore = (minmaxScores.first != pieceSegmentScores.end())
+                        ? *minmaxScores.first
+                        : static_cast<Real>(0.0);
+                    const Real maxScore = (minmaxScores.second != pieceSegmentScores.end())
+                        ? *minmaxScores.second
+                        : static_cast<Real>(0.0);
+                    const Real score = pieceSegmentScores[static_cast<size_t>(localEdgeIndex)];
+                    const Real normalizedScore =
+                        std::abs(maxScore - minScore) <= static_cast<Real>(1e-8)
+                            ? static_cast<Real>(0.5)
+                            : (score - minScore) / (maxScore - minScore);
+                    scoreColor = grayscaleColorFromValue(normalizedScore);
+                    activeColor = scoreColor;
                 }
 
                 PBD::MiniGL::drawSphere(
@@ -302,11 +366,45 @@ namespace CableVisualization
                     activeColor,
                     static_cast<float>(ropeCfg.renderRadius));
 
-                if (highlightTarget)
+                if (m < state.scoredHoops.size())
                 {
-                    const Vector3r midpoint = static_cast<Real>(0.5) * (p0 + p1);
-                    targetMarkers.push_back(midpoint + Vector3r(0.0, 0.015, 0.0));
+                    for (size_t hoopIndex = 0; hoopIndex < state.scoredHoops[m].size(); ++hoopIndex)
+                    {
+                        const TanglementAnalyzer::HoopCandidate& hoop = state.scoredHoops[m][hoopIndex];
+                        int hoopMidEdge = static_cast<int>(
+                            std::round(
+                                static_cast<Real>(0.5) *
+                                (static_cast<Real>(hoop.startEdge) +
+                                 static_cast<Real>(hoop.endEdge))));
+                        hoopMidEdge = std::max(0, std::min(hoopMidEdge, static_cast<int>(lineModel->getEdges().size()) - 1));
+                        if (localEdgeIndex != hoopMidEdge)
+                            continue;
+
+                        float* markerColor = hoop.pairSumScore > 0 ? kRedColor : kCyanColor;
+                        const bool markerSelected =
+                            hoopSelection.selected &&
+                            m == hoopSelection.pieceIndex &&
+                            hoopSelection.hoopIndex == hoopIndex;
+                        if (markerSelected)
+                            markerColor = kWhiteColor;
+
+                        const GLboolean depthWasEnabled = glIsEnabled(GL_DEPTH_TEST);
+                        if (depthWasEnabled)
+                            glDisable(GL_DEPTH_TEST);
+                        PBD::MiniGL::drawSphere(
+                            static_cast<Real>(0.5) * (p0 + p1),
+                            markerSelected ? 0.065f : 0.045f,
+                            markerColor);
+                        if (depthWasEnabled)
+                            glEnable(GL_DEPTH_TEST);
+                    }
                 }
+
+                // if (highlightTarget)
+                // {
+                //     const Vector3r midpoint = static_cast<Real>(0.5) * (p0 + p1);
+                //     targetMarkers.push_back(midpoint + Vector3r(0.0, 0.015, 0.0));
+                // }
             }
         }
 
@@ -318,7 +416,7 @@ namespace CableVisualization
             PBD::MiniGL::drawSphere(
                 markerPos,
                 0.03f,
-                kBlackColor);
+                kRedColor);
             if (depthWasEnabled)
                 glEnable(GL_DEPTH_TEST);
         }
@@ -433,9 +531,6 @@ namespace CableVisualization
             for (size_t hoopIndex = 0; hoopIndex < state.scoredHoops[pieceIndex].size(); ++hoopIndex)
             {
                 const TanglementAnalyzer::HoopCandidate& hoop = state.scoredHoops[pieceIndex][hoopIndex];
-                if (hoop.pairSumScore == 0)
-                    continue;
-
                 const int hoopStart = std::min(hoop.startEdge, hoop.endEdge);
                 const int hoopEnd = std::max(hoop.startEdge, hoop.endEdge);
                 const int middleEdge = static_cast<int>(

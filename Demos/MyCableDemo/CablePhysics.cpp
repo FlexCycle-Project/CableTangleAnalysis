@@ -37,6 +37,9 @@ struct Int3Hash
 
 struct VelocityPairCorrection
 {
+    // Contact damping is applied at segment closest points. These fields store
+    // the four endpoint indices and barycentric weights needed to distribute
+    // the relative velocity correction back to particles.
     unsigned int i0, i1, j0, j1;
     Real wP0, wP1, wQ0, wQ1;
     Vector3r nrm;
@@ -92,6 +95,9 @@ void closestPtSegmentSegment(
     Real& s, Real& t,
     Vector3r& c1, Vector3r& c2)
 {
+    // Standard closest-points query between two finite line segments. The
+    // parameters s and t are barycentric coordinates on segment p1-q1 and
+    // p2-q2, and are later reused to distribute contact corrections.
     const Real eps = static_cast<Real>(1e-8);
 
     const Vector3r d1 = q1 - p1;
@@ -157,6 +163,9 @@ void recomputeVelocitiesFromPositions(
     Real dt,
     Real blend)
 {
+    // PBD modifies positions directly, so the final velocity must be rebuilt
+    // from the actual corrected displacement. Blending keeps this correction
+    // from injecting sharp velocity changes after contact projection.
     ParticleData& pd = model->getParticles();
     const unsigned int n = pd.getNumberOfParticles();
     if (oldPositions.size() != n || dt <= static_cast<Real>(1e-12))
@@ -196,6 +205,9 @@ void addCableModel(
     Vector3r previousDirection(0, 0, 1);
     for (int i = 0; i < quaternionCount; ++i)
     {
+        // Segment orientations store the local Cosserat frame. The cumulative
+        // quaternion chain follows the cable tangent while avoiding Euler-angle
+        // singularities.
         const Vector3r edge = ropePoints[i + 1] - ropePoints[i];
         Vector3r currentDirection;
 
@@ -245,6 +257,8 @@ void addCableModel(
 
     for (unsigned int i = 0; i < edges.size(); ++i)
     {
+        // Stretch-shear constraints couple each segment length/direction with
+        // its material frame, giving axial and shear resistance.
         const unsigned int p0 = edges[i].m_vert[0] + pointOffset;
         const unsigned int p1 = edges[i].m_vert[1] + pointOffset;
         const unsigned int q = edges[i].m_quat + quatOffset;
@@ -260,6 +274,8 @@ void addCableModel(
 
     for (unsigned int i = 0; i + 1 < edges.size(); ++i)
     {
+        // Bend-twist constraints compare neighboring material frames, which is
+        // the discrete analogue of curvature and twist in a Cosserat rod.
         const unsigned int q0 = edges[i].m_quat + quatOffset;
         const unsigned int q1 = edges[i + 1].m_quat + quatOffset;
 
@@ -284,6 +300,9 @@ void setNewCableBendTwistRestStateToStraight(
     const SimulationModel::ConstraintVector& constraints = model->getConstraints();
     for (size_t i = firstConstraintIndex; i < constraints.size(); ++i)
     {
+        // New randomly generated cables should not treat their initial random
+        // shape as stress-free. Resetting bend-twist rest states to identity
+        // makes the cable relax toward a straight natural shape.
         Constraint* constraint = constraints[i];
         if (constraint == nullptr ||
             constraint->getTypeId() != BendTwistConstraint::TYPE_ID)
@@ -330,6 +349,9 @@ void applyMouseDragForces(
     const Real w0 = static_cast<Real>(1.0) - dragState.edgeT;
     const Real w1 = dragState.edgeT;
 
+    // Dragging acts at the selected point on an edge, not at a single particle.
+    // The same barycentric weights distribute the spring-damper force to the
+    // two endpoints, keeping the interaction continuous along the cable.
     const Vector3r p0 = particles.getPosition(i0);
     const Vector3r p1 = particles.getPosition(i1);
     const Vector3r v0 = particles.getVelocity(i0);
@@ -378,6 +400,9 @@ static std::vector<CableEdgeRef> collectCableEdges(
     const ParticleData& pd,
     const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges)
 {
+    // Keep both local edge indices and global particle indices. Local indices
+    // are used for arc-length exclusion inside one cable piece; global indices
+    // are needed to read/write particles in the simulation model.
     std::vector<CableEdgeRef> edges;
     if (pieceRanges.empty())
         return edges;
@@ -414,6 +439,9 @@ collectSelfCollisionCandidatesSpatialHash(
     if (edgeRefs.size() < 2)
         return {};
 
+    // Broad phase: insert each edge's inflated AABB into a uniform grid. Edges
+    // sharing a grid cell become narrow-phase candidates, avoiding an O(n^2)
+    // all-pairs segment test in dense cable configurations.
     std::unordered_map<Int3, std::vector<unsigned int>, Int3Hash> grid;
     grid.reserve(edgeRefs.size() * 2);
 
@@ -454,6 +482,8 @@ collectSelfCollisionCandidatesSpatialHash(
     std::unordered_set<uint64_t> uniquePairs;
     uniquePairs.reserve(edgeRefs.size() * 8);
 
+    // The same edge pair can appear in multiple cells; uniquePairs collapses
+    // duplicates before narrow-phase closest-point checks.
     for (const auto& entry : grid)
     {
         const std::vector<unsigned int>& edgeIndices = entry.second;
@@ -503,6 +533,9 @@ void applyBendTwistRestStateCreep(
         return;
     if (creepCounter == creepCfg.activationDelaySteps)
     {
+        // After the initial settling phase, capture the current relative
+        // segment orientations as the new bend-twist rest state. This gives
+        // the cable deformation memory without changing stretch rest lengths.
         OrientationData& orientations = model->getOrientations();
         SimulationModel::ConstraintVector& constraints = model->getConstraints();
 
@@ -566,6 +599,8 @@ void applyBendTwistRestStateCreep(
         if (mismatch < creepCfg.activationThreshold)
             continue;
 
+        // Slow blend toward sustained deformation. The quaternion sign check
+        // above keeps both rotations on the same hemisphere before blending.
         Eigen::Matrix<Real, 4, 1> blendedCoeffs =
             (static_cast<Real>(1.0) - creepCfg.creep) * restRelative.coeffs() +
             creepCfg.creep * currentRelative.coeffs();
@@ -656,14 +691,30 @@ std::vector<SelfCollisionContact> detectSelfCollisionContacts(
             minDist,
             collisionCfg.hashCellSize);
 
+    // Narrow phase: confirm spatial-hash candidates by segment-segment
+    // closest distance. Adjacent edges on the same piece are ignored because
+    // they are connected by construction and are not self-collisions.
     contacts.reserve(candidates.size());
     for (const auto& pair : candidates)
     {
-        const unsigned int i = pair.first;
-        const unsigned int j = pair.second;
+        const CableEdgeRef& edgeA = edgeRefs[pair.first];
+        const CableEdgeRef& edgeB = edgeRefs[pair.second];
+        const unsigned int i = edgeA.startParticle;
+        const unsigned int j = edgeB.startParticle;
 
-        const Real arcDist = static_cast<Real>(std::abs((int)j - (int)i)) * ropeCfg.dx;
-        if (arcDist < collisionCfg.excludeArcLength)
+        if (edgeA.pieceIndex == edgeB.pieceIndex)
+        {
+            const Real arcDist =
+                static_cast<Real>(
+                    std::abs(
+                        static_cast<int>(edgeB.localEdgeIndex) -
+                        static_cast<int>(edgeA.localEdgeIndex))) *
+                ropeCfg.dx;
+            if (arcDist < collisionCfg.excludeArcLength)
+                continue;
+        }
+
+        if (i + 1 >= n || j + 1 >= n)
             continue;
 
         const Vector3r p0 = pd.getPosition(i);
@@ -700,6 +751,10 @@ void applySelfCollision(
     const Real eps = static_cast<Real>(1e-8);
     const Real alpha = collisionCfg.compliance / (dt * dt);
 
+    // These buffers implement a Jacobi-style contact pass: all endpoint
+    // corrections are accumulated first and applied after the contacts are
+    // processed. Repeating applySelfCollision several times gives iterative
+    // convergence while reducing contact-order dependence inside one pass.
     static std::vector<Vector3r> posDelta;
     static std::vector<unsigned int> contactCount;
     static std::vector<VelocityPairCorrection> velocityCorrections;
@@ -728,11 +783,24 @@ void applySelfCollision(
 
     for (const auto& pair : candidates)
     {
-        const unsigned int i = pair.first;
-        const unsigned int j = pair.second;
+        const CableEdgeRef& edgeA = edgeRefs[pair.first];
+        const CableEdgeRef& edgeB = edgeRefs[pair.second];
+        const unsigned int i = edgeA.startParticle;
+        const unsigned int j = edgeB.startParticle;
 
-        const Real arcDist = static_cast<Real>(std::abs((int)j - (int)i)) * ropeCfg.dx;
-        if (arcDist < collisionCfg.excludeArcLength)
+        if (edgeA.pieceIndex == edgeB.pieceIndex)
+        {
+            const Real arcDist =
+                static_cast<Real>(
+                    std::abs(
+                        static_cast<int>(edgeB.localEdgeIndex) -
+                        static_cast<int>(edgeA.localEdgeIndex))) *
+                ropeCfg.dx;
+            if (arcDist < collisionCfg.excludeArcLength)
+                continue;
+        }
+
+        if (i + 1 >= n || j + 1 >= n)
             continue;
 
         const unsigned int i0 = i;
@@ -749,6 +817,9 @@ void applySelfCollision(
         Vector3r c1, c2;
         closestPtSegmentSegment(p0, p1, q0, q1, s, t, c1, c2);
 
+        // Contact is represented at closest points c1 and c2, usually inside
+        // the two segments. Parameters s and t become barycentric weights for
+        // distributing the correction to the four endpoints.
         Vector3r delta = c2 - c1;
         Real dist = delta.norm();
 
@@ -772,6 +843,7 @@ void applySelfCollision(
         if (C >= static_cast<Real>(0.0))
             continue;
 
+        // Endpoint weights for c1=(1-s)p0+s p1 and c2=(1-t)q0+t q1.
         const Real wP0 = static_cast<Real>(1.0) - s;
         const Real wP1 = s;
         const Real wQ0 = static_cast<Real>(1.0) - t;
@@ -791,6 +863,8 @@ void applySelfCollision(
         if (denom <= eps)
             continue;
 
+        // XPBD-style compliant projection for C = distance - 2r. The normal is
+        // the constraint gradient direction; alpha softens the contact.
         const Real deltaLambda = -C / denom;
 
         Vector3r dp0 = clampVec(deltaLambda * gradP0, collisionCfg.maxCorrection);
@@ -810,6 +884,8 @@ void applySelfCollision(
         velocityCorrections.push_back({ i0, i1, j0, j1, wP0, wP1, wQ0, wQ1, nrm });
     }
 
+    // Apply the averaged accumulated position corrections. The 0.5 scale keeps
+    // a particle shared by many simultaneous contacts from overreacting.
     for (unsigned int i = 0; i < n; ++i)
     {
         if (contactCount[i] == 0)
@@ -823,6 +899,9 @@ void applySelfCollision(
 
     for (const auto& vc : velocityCorrections)
     {
+        // Velocity damping is evaluated at the same segment contact points as
+        // the position constraint, then distributed to endpoints with the same
+        // barycentric weights.
         const Vector3r vP =
             vc.wP0 * pd.getVelocity(vc.i0) +
             vc.wP1 * pd.getVelocity(vc.i1);
@@ -844,6 +923,8 @@ void applySelfCollision(
         if (vn < static_cast<Real>(0.0) && collisionCfg.normalDamping > static_cast<Real>(0.0))
             applyImpulse(-collisionCfg.normalDamping * vn * vc.nrm);
 
+        // Tangential damping removes sliding energy along the contact plane but
+        // does not act like Coulomb friction; it is a stabilizing velocity blend.
         const Vector3r vt = relV - relV.dot(vc.nrm) * vc.nrm;
         const Real vtNorm = vt.norm();
         if (vtNorm > eps)

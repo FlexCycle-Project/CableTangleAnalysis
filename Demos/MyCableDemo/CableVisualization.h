@@ -44,6 +44,7 @@ namespace CableVisualization
         std::vector<std::vector<TanglementAnalyzer::HoopCandidate>> scoredHoops;
         std::vector<std::vector<int>> problematicHoopMiddleEdges;
         std::vector<std::vector<int>> targetHoopMiddleEdges;
+        std::vector<std::vector<Real>> segmentScores;
 
         void clear();
     };
@@ -56,7 +57,8 @@ namespace CableVisualization
         const RopeConfig& ropeCfg,
         const HighlightSelection& selection,
         const HoopMarkerSelection& hoopSelection,
-        const VisualizationState& state);
+        const VisualizationState& state,
+        bool showSegmentScores);
 
     bool buildPickRay(
         const ::Vector2i& screenPos,
