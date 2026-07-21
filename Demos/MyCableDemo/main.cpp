@@ -93,10 +93,12 @@ static std::string resolveDefaultKnotSeedBankPath();
 static std::string resolveDefaultKnotSeedCatalogPath();
 static std::string resolveDefaultCutEvalOutputPath();
 static std::string resolveDefaultCutsToZeroEvalOutputPath();
+static size_t countCurvatureSamples(const std::vector<Vector3r>& points);
 static Real computeTotalCurvature(const std::vector<Vector3r>& points);
 static Real computeCurvatureOutsideKnotRegions(
     const std::vector<Vector3r>& points,
-    const PBD::KymoKnotAnalysisResult& knotResult);
+    const PBD::KymoKnotAnalysisResult& knotResult,
+    size_t* sampleCount = nullptr);
 static void generateNextCatalogSeed();
 static bool loadCutEvalCatalog();
 static bool prepareCutEvalOutputFile();
@@ -591,6 +593,11 @@ static void saveCurrentKnotSeedPreset()
         std::cout << "[knot-seeds] the current seed was already catalogued." << std::endl;
 }
 
+static size_t countCurvatureSamples(const std::vector<Vector3r>& points)
+{
+    return points.size() < 3 ? 0 : points.size() - 2;
+}
+
 static Real computeTotalCurvature(const std::vector<Vector3r>& points)
 {
     if (points.size() < 3)
@@ -617,8 +624,12 @@ static Real computeTotalCurvature(const std::vector<Vector3r>& points)
 
 static Real computeCurvatureOutsideKnotRegions(
     const std::vector<Vector3r>& points,
-    const PBD::KymoKnotAnalysisResult& knotResult)
+    const PBD::KymoKnotAnalysisResult& knotResult,
+    size_t* sampleCount)
 {
+    if (sampleCount)
+        *sampleCount = 0;
+
     if (points.size() < 3)
         return static_cast<Real>(0.0);
 
@@ -636,6 +647,9 @@ static Real computeCurvatureOutsideKnotRegions(
     {
         if (insideKnot[i])
             continue;
+
+        if (sampleCount)
+            ++(*sampleCount);
 
         const Vector3r a = points[i] - points[i - 1];
         const Vector3r b = points[i + 1] - points[i];
@@ -664,9 +678,20 @@ static void appendCatalogRows(
         return;
 
     bool needsHeader = true;
+    bool writeLegacyClusterColumn = false;
+    bool writeCurvatureDensityColumns = true;
     {
         std::ifstream in(g_knotSeedCatalogPath);
         needsHeader = !in.good() || in.peek() == std::ifstream::traits_type::eof();
+        if (!needsHeader)
+        {
+            std::string headerLine;
+            std::getline(in, headerLine);
+            writeLegacyClusterColumn =
+                headerLine.find("\tclusterPenalty\t") != std::string::npos;
+            writeCurvatureDensityColumns =
+                headerLine.find("\ttotalCurvatureDensity\t") != std::string::npos;
+        }
     }
 
     std::ofstream out(g_knotSeedCatalogPath, std::ios::app);
@@ -682,8 +707,8 @@ static void appendCatalogRows(
             << "\ttotalHoopCount\tthreadedHoopCount\ttotalThreadingCount\tmaxHoopScore\taverageHoopScore"
             << "\tselfCollisionCount\tclosePairCount\tsamePieceClosePairCount\tcrossPieceClosePairCount"
             << "\tcontactParticipationCount\tminPairDistance\tknotSpanFraction\tproximityScore"
-            << "\tcrossPieceProximityScore\tsamePieceProximityScore\tclusterPenalty"
-            << "\ttotalCurvature\toutsideKnotCurvature\tcleanScore\n";
+            << "\tcrossPieceProximityScore\tsamePieceProximityScore"
+            << "\ttotalCurvatureDensity\toutsideKnotCurvatureDensity\tentanglementScore\n";
     }
 
     const TanglementAnalyzer::ThreadingMetricsSnapshot threading =
@@ -692,11 +717,19 @@ static void appendCatalogRows(
     const size_t totalHoopCount = tanglement.allCrossingEvents.size();
 
     Real totalCurvature = static_cast<Real>(0.0);
+    size_t totalCurvatureSampleCount = 0;
     for (const std::vector<Vector3r>& piece : ropePieces)
+    {
         totalCurvature += computeTotalCurvature(piece);
+        totalCurvatureSampleCount += countCurvatureSamples(piece);
+    }
+    const Real totalCurvatureDensity = totalCurvatureSampleCount == 0
+        ? static_cast<Real>(0.0)
+        : totalCurvature / static_cast<Real>(totalCurvatureSampleCount);
 
     std::vector<std::pair<std::string, size_t>> records;
     Real outsideKnotCurvature = totalCurvature;
+    size_t outsideKnotCurvatureSampleCount = totalCurvatureSampleCount;
     size_t detectedKnotCount = 0;
     bool sawUnknot = false;
 
@@ -716,12 +749,21 @@ static void appendCatalogRows(
 
             ++detectedKnotCount;
             if (pieceIndex < ropePieces.size())
-                outsideKnotCurvature = computeCurvatureOutsideKnotRegions(ropePieces[pieceIndex], knotResult);
+            {
+                size_t outsideSamples = 0;
+                outsideKnotCurvature =
+                    computeCurvatureOutsideKnotRegions(ropePieces[pieceIndex], knotResult, &outsideSamples);
+                outsideKnotCurvatureSampleCount = outsideSamples;
+            }
 
             const std::string knotType = segment.knotType;
             records.emplace_back(knotType, pieceIndex);
         }
     }
+
+    const Real outsideKnotCurvatureDensity = outsideKnotCurvatureSampleCount == 0
+        ? static_cast<Real>(0.0)
+        : outsideKnotCurvature / static_cast<Real>(outsideKnotCurvatureSampleCount);
 
     if (records.empty())
         records.emplace_back(sawUnknot ? "UN" : "none", std::numeric_limits<size_t>::max());
@@ -730,8 +772,8 @@ static void appendCatalogRows(
     const Real finiteMinDistance =
         std::isfinite(metrics.minimumPairDistance) ? metrics.minimumPairDistance : static_cast<Real>(-1.0);
 
-    // Normalized cleanScore: each term is min-max normalized using catalog-derived constants
-    // so that weights reflect actual contribution rather than raw scale differences.
+    // Catalog-level entanglement score: each term is min-max normalized using
+    // catalog-derived constants so raw scale differences do not dominate.
     // Normalization ranges are fixed from knot_seed_catalog_v3.tsv (403 entries).
     // Values outside the catalog range are clamped to [0, 1].
     auto normClamp = [](Real v, Real mn, Real mx) -> Real {
@@ -742,11 +784,11 @@ static void appendCatalogRows(
     const Real nClosePair   = normClamp(static_cast<Real>(metrics.closePairCount),                  static_cast<Real>(914),   static_cast<Real>(3186));
     const Real nContactPart = normClamp(static_cast<Real>(metrics.contactParticipationCount),       static_cast<Real>(4),     static_cast<Real>(137));
     const Real nKnotSpan    = normClamp(metrics.knotSpanFraction,                                   static_cast<Real>(0),     static_cast<Real>(0.898));
-    const Real nOutsideCurv = normClamp(outsideKnotCurvature,                                       static_cast<Real>(0.363), static_cast<Real>(56.785));
+    const Real nOutsideCurv = normClamp(outsideKnotCurvatureDensity,                                static_cast<Real>(0.0),   static_cast<Real>(0.10));
     const Real nProximity   = normClamp(metrics.proximityScore,                                     static_cast<Real>(0.016), static_cast<Real>(0.044));
     // extraKnotCount kept unnormalized: it is 0 for all catalog entries but carries a
     // large penalty (5.0) when multiple simultaneous knots are detected.
-    const Real cleanScore =
+    const Real catalogEntanglementScore =
         static_cast<Real>(3.00) * nThreading   +
         static_cast<Real>(0.24) * nClosePair   +
         static_cast<Real>(0.17) * nContactPart +
@@ -780,11 +822,12 @@ static void appendCatalogRows(
             << metrics.knotSpanFraction << '\t'
             << metrics.proximityScore << '\t'
             << metrics.crossPieceProximityScore << '\t'
-            << metrics.samePieceProximityScore << '\t'
-            << metrics.clusterPenalty << '\t'
-            << totalCurvature << '\t'
-            << outsideKnotCurvature << '\t'
-            << cleanScore << '\n';
+            << metrics.samePieceProximityScore << '\t';
+        if (writeLegacyClusterColumn)
+            out << static_cast<Real>(0.0) << '\t';
+        out << (writeCurvatureDensityColumns ? totalCurvatureDensity : totalCurvature) << '\t'
+            << (writeCurvatureDensityColumns ? outsideKnotCurvatureDensity : outsideKnotCurvature) << '\t'
+            << catalogEntanglementScore << '\n';
     }
 
     std::cout << "[knot-catalog] wrote " << records.size()

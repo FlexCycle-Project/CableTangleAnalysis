@@ -52,14 +52,11 @@ public:
         Real proximityScore = static_cast<Real>(0.0);
         Real crossPieceProximityScore = static_cast<Real>(0.0);
         Real samePieceProximityScore = static_cast<Real>(0.0);
-        Real clusterPenalty = static_cast<Real>(0.0);
         Real minimumPairDistance = std::numeric_limits<Real>::infinity();
         size_t closePairCount = 0;
         size_t samePieceClosePairCount = 0;
         size_t crossPieceClosePairCount = 0;
         size_t closeSegmentCount = 0;
-        size_t entangledComponentCount = 0;
-        size_t multiPieceComponentCount = 0;
     };
 
     struct ThreadingMetricsSnapshot

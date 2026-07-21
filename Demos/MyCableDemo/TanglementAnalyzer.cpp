@@ -629,14 +629,16 @@ namespace
             if (hoop.pairSumScore == 0)
                 continue;
 
-            // Propagate each hoop score to its covered edge interval. This
-            // converts loop-level threading evidence into an edge-level score
-            // suitable for visualization or finer cut selection.
+            // Propagate each hoop score across its covered edge interval. The
+            // contribution is normalized by hoop size so long hoops do not add
+            // more total edge evidence simply because they contain more edges.
             const int hoopStart = std::max(0, std::min(hoop.startEdge, hoop.endEdge));
             const int hoopEnd = std::min(pieceEdgeCount - 1, std::max(hoop.startEdge, hoop.endEdge));
+            const Real hoopSize = static_cast<Real>(std::max(1, hoopEnd - hoopStart + 1));
+            const Real edgeContribution = static_cast<Real>(hoop.pairSumScore) / hoopSize;
             for (int edgeIndex = hoopStart; edgeIndex <= hoopEnd; ++edgeIndex)
             {
-                segmentScores[static_cast<size_t>(edgeIndex)] += static_cast<Real>(hoop.pairSumScore);
+                segmentScores[static_cast<size_t>(edgeIndex)] += edgeContribution;
                 hasAnyScore = true;
             }
         }
@@ -671,44 +673,6 @@ namespace
             const std::size_t h3 = std::hash<int>()(c.z);
             return h1 ^ (h2 * 73856093u) ^ (h3 * 19349663u);
         }
-    };
-
-    class DisjointSet
-    {
-    public:
-        explicit DisjointSet(size_t n)
-            : m_parent(n), m_rank(n, 0)
-        {
-            for (size_t i = 0; i < n; ++i)
-                m_parent[i] = i;
-        }
-
-        size_t find(size_t x)
-        {
-            if (m_parent[x] == x)
-                return x;
-            m_parent[x] = find(m_parent[x]);
-            return m_parent[x];
-        }
-
-        void unite(size_t a, size_t b)
-        {
-            a = find(a);
-            b = find(b);
-            if (a == b)
-                return;
-
-            if (m_rank[a] < m_rank[b])
-                std::swap(a, b);
-
-            m_parent[b] = a;
-            if (m_rank[a] == m_rank[b])
-                ++m_rank[a];
-        }
-
-    private:
-        std::vector<size_t> m_parent;
-        std::vector<unsigned char> m_rank;
     };
 
     static uint64_t makeOrderedSegmentPairKey(size_t a, size_t b)
@@ -887,7 +851,6 @@ namespace
                 ropeCfg,
                 collisionCfg);
 
-        DisjointSet componentSets(segments.size());
         std::vector<char> segmentTouched(segments.size(), 0);
         Real samePieceProximitySum = static_cast<Real>(0.0);
         Real crossPieceProximitySum = static_cast<Real>(0.0);
@@ -931,7 +894,6 @@ namespace
 
             segmentTouched[first] = 1;
             segmentTouched[second] = 1;
-            componentSets.unite(first, second);
         }
 
         snapshot.minimumPairDistance = minimumPairDistance;
@@ -947,48 +909,10 @@ namespace
             ? static_cast<Real>(0.0)
             : crossPieceProximitySum / static_cast<Real>(segments.size());
 
-        struct ComponentStats
-        {
-            size_t segmentCount = 0;
-            std::unordered_set<size_t> pieceIndices;
-        };
-
-        std::unordered_map<size_t, ComponentStats> components;
-        for (size_t segmentIndex = 0; segmentIndex < segments.size(); ++segmentIndex)
-        {
-            if (!segmentTouched[segmentIndex])
-                continue;
-
-            const size_t root = componentSets.find(segmentIndex);
-            components[root].segmentCount += 1;
-            components[root].pieceIndices.insert(segments[segmentIndex].pieceIndex);
-        }
-
-        Real clusterPenaltySum = static_cast<Real>(0.0);
-        for (const auto& entry : components)
-        {
-            // Only multi-piece close-pair components contribute to the cluster
-            // penalty; single-piece folding is counted separately as same-piece
-            // proximity and is less important for inter-cable separation.
-            const size_t segmentCount = entry.second.segmentCount;
-            const size_t pieceCount = entry.second.pieceIndices.size();
-            if (segmentCount < 2 || pieceCount < 2)
-                continue;
-
-            ++snapshot.entangledComponentCount;
-            ++snapshot.multiPieceComponentCount;
-            clusterPenaltySum += static_cast<Real>(segmentCount - 1);
-        }
-
-        snapshot.clusterPenalty = segments.empty()
-            ? static_cast<Real>(0.0)
-            : clusterPenaltySum / static_cast<Real>(segments.size());
         const Real samePieceWeight = static_cast<Real>(0.1);
-        const Real componentWeight = static_cast<Real>(0.25);
         snapshot.entanglementScore =
             snapshot.crossPieceProximityScore +
-            samePieceWeight * snapshot.samePieceProximityScore +
-            componentWeight * snapshot.clusterPenalty;
+            samePieceWeight * snapshot.samePieceProximityScore;
         snapshot.proximityScore = snapshot.entanglementScore;
 
         for (size_t pieceIndex = 0; pieceIndex < ropePieces.size(); ++pieceIndex)
@@ -1286,13 +1210,10 @@ void TanglementAnalyzer::printTanglementReport(
               << " proximity=" << result.metrics.proximityScore
               << " cross=" << result.metrics.crossPieceProximityScore
               << " same=" << result.metrics.samePieceProximityScore
-              << " clusterPenalty=" << result.metrics.clusterPenalty
               << " closePairs=" << result.metrics.closePairCount
               << " [same=" << result.metrics.samePieceClosePairCount
               << ", cross=" << result.metrics.crossPieceClosePairCount << "]"
               << " closeSegments=" << result.metrics.closeSegmentCount
-              << " components=" << result.metrics.entangledComponentCount
-              << " multiPieceComponents=" << result.metrics.multiPieceComponentCount
               << std::endl;
     std::cout << "  global: minimumPairDistance=";
     if (std::isfinite(result.metrics.minimumPairDistance))
