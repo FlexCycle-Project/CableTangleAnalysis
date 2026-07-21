@@ -69,7 +69,12 @@ namespace PBD
 			if (env != nullptr && env[0] != '\0')
 				return Utilities::FileSystem::normalizePath(env);
 
-			return "C:/Users/alpse/Desktop/KymoKnot-clone";
+			const std::string bundledRoot = Utilities::FileSystem::normalizePath(
+				Utilities::FileSystem::getProgramPath() + "/../KymoKnot-clone");
+			if (Utilities::FileSystem::fileExists(bundledRoot + "/KymoKnot_linear.x"))
+				return bundledRoot;
+
+			return Utilities::FileSystem::normalizePath("KymoKnot-clone");
 		}
 
 		static std::string makeTempWorkDirectory()
