@@ -52,6 +52,13 @@ struct CableEdgeRef
     unsigned int startParticle;
 };
 
+static std::uint64_t makeEdgePairKey(unsigned int edgeA, unsigned int edgeB)
+{
+    const unsigned int a = std::min(edgeA, edgeB);
+    const unsigned int b = std::max(edgeA, edgeB);
+    return (static_cast<std::uint64_t>(a) << 32) | static_cast<std::uint64_t>(b);
+}
+
 Real clamp01(Real x)
 {
     if (x < static_cast<Real>(0.0))
@@ -758,6 +765,7 @@ void applySelfCollision(
     static std::vector<Vector3r> posDelta;
     static std::vector<unsigned int> contactCount;
     static std::vector<VelocityPairCorrection> velocityCorrections;
+    static std::unordered_map<std::uint64_t, Vector3r> previousContactNormals;
 
     if (posDelta.size() < n)
         posDelta.resize(n);
@@ -772,6 +780,9 @@ void applySelfCollision(
 
     velocityCorrections.clear();
     velocityCorrections.reserve(n * 2);
+    std::unordered_map<std::uint64_t, Vector3r> currentContactNormals;
+    currentContactNormals.reserve(n * 2);
+    unsigned int normalFlipViolationCount = 0;
 
     const std::vector<CableEdgeRef> edgeRefs = collectCableEdges(pd, pieceRanges);
     const std::vector<std::pair<unsigned int, unsigned int>> candidates =
@@ -842,6 +853,16 @@ void applySelfCollision(
         const Real C = dist - minDist;
         if (C >= static_cast<Real>(0.0))
             continue;
+
+        const std::uint64_t contactKey = makeEdgePairKey(i, j);
+        const auto previousNormalIt = previousContactNormals.find(contactKey);
+        if (previousNormalIt != previousContactNormals.end())
+        {
+            const Real normalDot = previousNormalIt->second.dot(nrm);
+            if (normalDot < static_cast<Real>(0.0))
+                ++normalFlipViolationCount;
+        }
+        currentContactNormals[contactKey] = nrm;
 
         // Endpoint weights for c1=(1-s)p0+s p1 and c2=(1-t)q0+t q1.
         const Real wP0 = static_cast<Real>(1.0) - s;
@@ -933,4 +954,12 @@ void applySelfCollision(
                 applyImpulse(-collisionCfg.tangentialDamping * vt);
         }
     }
+
+    if (normalFlipViolationCount > 0)
+    {
+        std::cout << "[self-collision] possible side-switch normal flips: "
+                  << normalFlipViolationCount << std::endl;
+    }
+
+    previousContactNormals.swap(currentContactNormals);
 }

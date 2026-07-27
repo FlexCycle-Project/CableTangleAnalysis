@@ -137,6 +137,7 @@ static bool g_evalCutsToZeroEnabled = false;
 static std::string g_evalCutsToZeroOutputPath;
 static unsigned int g_evalCutsToZeroMaxCuts = 10;
 static unsigned int g_evalCutsToZeroRandomTrials = 20;
+static std::set<unsigned int> g_evalCutsToZeroCompletedSeeds;
 static size_t g_evalCurrentIndex = 0;
 static size_t g_evalSamplesWritten = 0;
 struct CutEvalSeedRecord
@@ -351,7 +352,73 @@ static bool prepareCutsToZeroEvalOutputFile()
     if (g_evalCutsToZeroOutputPath.empty())
         g_evalCutsToZeroOutputPath = resolveDefaultCutsToZeroEvalOutputPath();
 
-    std::ofstream out(g_evalCutsToZeroOutputPath, std::ios::trunc);
+    g_evalCutsToZeroCompletedSeeds.clear();
+    bool needsHeader = true;
+    {
+        std::ifstream in(g_evalCutsToZeroOutputPath);
+        if (in.good() && in.peek() != std::ifstream::traits_type::eof())
+        {
+            needsHeader = false;
+
+            std::string line;
+            if (std::getline(in, line))
+            {
+                const std::vector<std::string> header = splitTabSeparatedLine(line);
+                int seedColumn = -1;
+                for (size_t i = 0; i < header.size(); ++i)
+                {
+                    if (header[i] == "seed")
+                    {
+                        seedColumn = static_cast<int>(i);
+                        break;
+                    }
+                }
+
+                while (seedColumn >= 0 && std::getline(in, line))
+                {
+                    if (line.empty())
+                        continue;
+
+                    const std::vector<std::string> fields = splitTabSeparatedLine(line);
+                    if (static_cast<int>(fields.size()) <= seedColumn)
+                        continue;
+
+                    try
+                    {
+                        g_evalCutsToZeroCompletedSeeds.insert(
+                            static_cast<unsigned int>(
+                                std::stoul(fields[static_cast<size_t>(seedColumn)])));
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
+        }
+    }
+
+    if (!g_evalCutsToZeroCompletedSeeds.empty())
+    {
+        g_evalSeeds.erase(
+            std::remove_if(
+                g_evalSeeds.begin(),
+                g_evalSeeds.end(),
+                [](const CutEvalSeedRecord& record)
+                {
+                    return g_evalCutsToZeroCompletedSeeds.find(record.seed) !=
+                        g_evalCutsToZeroCompletedSeeds.end();
+                }),
+            g_evalSeeds.end());
+    }
+
+    if (g_evalSeeds.empty())
+    {
+        std::cout << "[cuts-to-zero] no pending seeds; output already contains "
+                  << g_evalCutsToZeroCompletedSeeds.size() << " seed(s)." << std::endl;
+        return false;
+    }
+
+    std::ofstream out(g_evalCutsToZeroOutputPath, std::ios::app);
     if (!out)
     {
         std::cout << "[cuts-to-zero] could not open output file "
@@ -359,8 +426,18 @@ static bool prepareCutsToZeroEvalOutputFile()
         return false;
     }
 
-    out << "seed\tknotType\tT_before\theuristic_cuts\theuristic_resolved"
-        << "\trandom_cuts_mean\trandom_cuts_std\trandom_resolved_rate\n";
+    if (needsHeader)
+    {
+        out << "seed\tknotType\tT_before\theuristic_cuts\theuristic_resolved"
+            << "\trandom_cuts_mean\trandom_cuts_std\trandom_resolved_rate\n";
+    }
+
+    if (!g_evalCutsToZeroCompletedSeeds.empty())
+    {
+        std::cout << "[cuts-to-zero] resuming; skipped "
+                  << g_evalCutsToZeroCompletedSeeds.size()
+                  << " completed seed(s)." << std::endl;
+    }
     return true;
 }
 
@@ -680,6 +757,7 @@ static void appendCatalogRows(
     bool needsHeader = true;
     bool writeLegacyClusterColumn = false;
     bool writeCurvatureDensityColumns = true;
+    bool writeLegacyEntanglementColumn = false;
     {
         std::ifstream in(g_knotSeedCatalogPath);
         needsHeader = !in.good() || in.peek() == std::ifstream::traits_type::eof();
@@ -691,6 +769,8 @@ static void appendCatalogRows(
                 headerLine.find("\tclusterPenalty\t") != std::string::npos;
             writeCurvatureDensityColumns =
                 headerLine.find("\ttotalCurvatureDensity\t") != std::string::npos;
+            writeLegacyEntanglementColumn =
+                headerLine.find("\tentanglementScore") != std::string::npos;
         }
     }
 
@@ -708,7 +788,7 @@ static void appendCatalogRows(
             << "\tselfCollisionCount\tclosePairCount\tsamePieceClosePairCount\tcrossPieceClosePairCount"
             << "\tcontactParticipationCount\tminPairDistance\tknotSpanFraction\tproximityScore"
             << "\tcrossPieceProximityScore\tsamePieceProximityScore"
-            << "\ttotalCurvatureDensity\toutsideKnotCurvatureDensity\tentanglementScore\n";
+            << "\ttotalCurvatureDensity\toutsideKnotCurvatureDensity\n";
     }
 
     const TanglementAnalyzer::ThreadingMetricsSnapshot threading =
@@ -772,31 +852,6 @@ static void appendCatalogRows(
     const Real finiteMinDistance =
         std::isfinite(metrics.minimumPairDistance) ? metrics.minimumPairDistance : static_cast<Real>(-1.0);
 
-    // Catalog-level entanglement score: each term is min-max normalized using
-    // catalog-derived constants so raw scale differences do not dominate.
-    // Normalization ranges are fixed from knot_seed_catalog_v3.tsv (403 entries).
-    // Values outside the catalog range are clamped to [0, 1].
-    auto normClamp = [](Real v, Real mn, Real mx) -> Real {
-        if (mx <= mn) return static_cast<Real>(0);
-        return std::max(static_cast<Real>(0), std::min(static_cast<Real>(1), (v - mn) / (mx - mn)));
-    };
-    const Real nThreading   = normClamp(static_cast<Real>(threading.totalThreadingCount),           static_cast<Real>(0),     static_cast<Real>(110));
-    const Real nClosePair   = normClamp(static_cast<Real>(metrics.closePairCount),                  static_cast<Real>(914),   static_cast<Real>(3186));
-    const Real nContactPart = normClamp(static_cast<Real>(metrics.contactParticipationCount),       static_cast<Real>(4),     static_cast<Real>(137));
-    const Real nKnotSpan    = normClamp(metrics.knotSpanFraction,                                   static_cast<Real>(0),     static_cast<Real>(0.898));
-    const Real nOutsideCurv = normClamp(outsideKnotCurvatureDensity,                                static_cast<Real>(0.0),   static_cast<Real>(0.10));
-    const Real nProximity   = normClamp(metrics.proximityScore,                                     static_cast<Real>(0.016), static_cast<Real>(0.044));
-    // extraKnotCount kept unnormalized: it is 0 for all catalog entries but carries a
-    // large penalty (5.0) when multiple simultaneous knots are detected.
-    const Real catalogEntanglementScore =
-        static_cast<Real>(3.00) * nThreading   +
-        static_cast<Real>(0.24) * nClosePair   +
-        static_cast<Real>(0.17) * nContactPart +
-        static_cast<Real>(0.56) * nKnotSpan    +
-        static_cast<Real>(0.12) * nOutsideCurv +
-        static_cast<Real>(5.00) * static_cast<Real>(extraKnotCount) +
-        static_cast<Real>(0.42) * nProximity;
-
     out << std::fixed << std::setprecision(6);
     for (const auto& record : records)
     {
@@ -826,8 +881,10 @@ static void appendCatalogRows(
         if (writeLegacyClusterColumn)
             out << static_cast<Real>(0.0) << '\t';
         out << (writeCurvatureDensityColumns ? totalCurvatureDensity : totalCurvature) << '\t'
-            << (writeCurvatureDensityColumns ? outsideKnotCurvatureDensity : outsideKnotCurvature) << '\t'
-            << catalogEntanglementScore << '\n';
+            << (writeCurvatureDensityColumns ? outsideKnotCurvatureDensity : outsideKnotCurvature);
+        if (writeLegacyEntanglementColumn)
+            out << '\t' << static_cast<Real>(0.0);
+        out << '\n';
     }
 
     std::cout << "[knot-catalog] wrote " << records.size()
