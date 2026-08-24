@@ -12,6 +12,73 @@ Furthermore we use our own library:
 
 **Author**: [Jan Bender](http://www.interactive-graphics.de), **License**: MIT
 
+## MyCableDemo
+
+The `MyCableDemo` executable ([`Demos/MyCableDemo/main.cpp`](Demos/MyCableDemo/main.cpp)) is an interactive cable/tanglement simulation. It lets you drag, cut, and evaluate knots in a simulated cable, pick random/mathematical knots, and run unattended headless evaluation or catalog runs.
+
+### Controls
+
+**Mouse**
+
+| Input | Action |
+| --- | --- |
+| Left-click + drag on a cable | Grab and drag the selected cable segment |
+| Left-click on a hoop marker | Select the hoop marker and print its tangle score |
+| `v` while a segment is grabbed | Enable upward pull on the selected segment |
+| Left-drag with `Alt` (on empty space) | Rotate the view |
+| Left-drag with `Shift` (on empty space) | Pan the view (x/y) |
+| Left-drag with `Ctrl` (on empty space) | Dolly the view (z) |
+| Mouse wheel | Zoom (adjust move speed) |
+
+> Clicking on a cable/hoop is handled by the demo; clicking on empty space falls through to the default camera controls.
+
+**Keyboard**
+
+| Key | Action |
+| --- | --- |
+| `r` | Reset the current simulation |
+| `o` | Regenerate a random cable (new seed) |
+| `k` | Toggle the mathematical knot preset (`5_2` on first press, then back to a straight cable) |
+| `t` | Run/print the tanglement (knot) evaluation for the current cable |
+| `c` | Cut the selected cable segment (must first be grabbed/dragged) |
+| `v` | Toggle upward pull on the selected grabbed segment |
+| `g` | Toggle gravity on/off |
+| `*` | Toggle end pull forces on/off |
+| `+` / `-` | Increase / decrease the end pull strength |
+| `z` / `x` | Move the camera toward / away from the scene |
+| Arrow keys | Pan the camera (left/right/up/down) |
+| `1`–`4` | Rotate the view around the x / y axes |
+
+### Command-line arguments
+
+Run `MyCableDemo` with one of the following flags. Unattended `--eval-*` / `--catalog-*` modes run headless (no interaction needed) and write their results to a file.
+
+| Argument | Description |
+| --- | --- |
+| `--no-cache` | Disable the framework's internal cache |
+| `--seed-bank=<path>` | Path to the knot-seed bank file |
+| `--catalog-file=<path>` | Path to the knot-seed catalog file |
+| `--seed=<n>` / `--random-seed=<n>` | Use a direct fixed RNG seed for the random cable |
+| `--knot=<name>` / `--knot-type=<name>` / `--knot <name>` | Load a specific knot seed preset by name |
+| `--catalog-run` | Run unattended catalog generation mode |
+| `--catalog-render` | Run catalog mode with rendering enabled |
+| `--catalog-steps-per-frame=<n>` | Simulation steps per frame in catalog mode (enables catalog mode) |
+| `--catalog-max=<n>` | Maximum number of catalog samples (enables catalog mode) |
+| `--catalog-start=<n>` | Starting seed for the catalog run (enables catalog mode) |
+| `--eval-run` | Run unattended cut-evaluation mode (headless) |
+| `--eval-cuts-to-zero` | Run unattended cuts-to-zero evaluation mode (headless) |
+| `--eval-output=<path>` | Output path for the cut-evaluation results |
+| `--eval-ctz-output=<path>` | Output path for the cuts-to-zero evaluation results |
+| `--eval-random-trials=<n>` | Number of random trials per sample in cut evaluation |
+| `--eval-ctz-max-cuts=<n>` | Max cuts per sample in cuts-to-zero evaluation |
+| `--eval-ctz-random-trials=<n>` | Random trials per sample in cuts-to-zero evaluation |
+
+Example headless run:
+
+```
+MyCableDemo --seed=42 --eval-run --eval-output=results.csv
+```
+
 ## News
 
 * We added a Python interface: [pyPBD](https://pypi.org/project/pyPBD/)
