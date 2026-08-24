@@ -225,7 +225,15 @@ void addCableModel(
 
         const Quaternionr rotation =
             Quaternionr::FromTwoVectors(previousDirection, currentDirection);
-        quaternions[i] = (i == 0) ? rotation : rotation * quaternions[i - 1];
+
+        if (i == 0)
+        {
+            quaternions[i] = rotation;
+        }
+        else
+        {
+            quaternions[i] = rotation * quaternions[i - 1];
+        }
         previousDirection = currentDirection;
     }
 

@@ -44,10 +44,10 @@ add_executable(MyCableDemo
 	  ../Common/imguiParameters.h
 	  ../Common/DemoBase.cpp
 	  ../Common/DemoBase.h
-	  
+
 	  ${VIS_FILES}
-	  ${PROJECT_PATH}/Common/Common.h	  
-	  
+	  ${PROJECT_PATH}/Common/Common.h
+
 	  CMakeLists.txt
 )
 
@@ -56,6 +56,7 @@ include_directories( ${EIGEN3_INCLUDE_DIR} )
 include_directories(${PROJECT_PATH}/extern/freeglut/include)
 include_directories(${PROJECT_PATH}/extern/glew/include)
 
+set_property(TARGET MyCableDemo PROPERTY CXX_STANDARD 17)
 set_target_properties(MyCableDemo PROPERTIES FOLDER "Demos")
 set_target_properties(MyCableDemo PROPERTIES DEBUG_POSTFIX ${CMAKE_DEBUG_POSTFIX})
 set_target_properties(MyCableDemo PROPERTIES RELWITHDEBINFO_POSTFIX ${CMAKE_RELWITHDEBINFO_POSTFIX})
