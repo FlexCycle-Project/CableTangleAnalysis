@@ -1,227 +1,300 @@
-# PositionBasedDynamics
+# CableSim
 
-<p align=center><img src="https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/workflows/build-linux/badge.svg">&nbsp;&nbsp; <img src="https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/workflows/build-linux-wheels/badge.svg">&nbsp;&nbsp; <img src="https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/workflows/build-windows/badge.svg">&nbsp;&nbsp; <img src="https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/workflows/build-windows-wheels/badge.svg">&nbsp;&nbsp; <a href='https://positionbaseddynamics.readthedocs.io/en/latest/?badge=latest'><img src='https://readthedocs.org/projects/positionbaseddynamics/badge/?version=latest' alt='Documentation Status' /></a></p>
+CableSim is a Linux-focused fork of [PositionBasedDynamics](https://github.com/InteractiveComputerGraphics/PositionBasedDynamics) for interactive cable manipulation and knot/tanglement analysis. The main application, `MyCableDemo`, simulates one or more cable pieces with position-based rod constraints, self-collision, mouse dragging and cutting, and evaluates the resulting topology with a bundled copy of [KymoKnot](https://kymoknot.sissa.it/).
 
-This library supports the physically-based simulation of mechanical effects. In the last years position-based simulation methods have become popular in the graphics community. In contrast to classical simulation approaches these methods compute the position changes in each simulation step directly, based on the solution of a quasi-static problem. Therefore, position-based approaches are fast, stable and controllable which make them well-suited for use in interactive environments. However, these methods are generally not as accurate as force-based methods but still provide visual plausibility. Hence, the main application areas of position-based simulation are virtual reality, computer games and special effects in movies and commercials.
+This branch (`linux`) contains the Linux port of the demo and the batch analysis workflows used to build and study the knot-seed catalog.
 
-The PositionBasedDynamics library allows the position-based handling of many types of constraints in a physically-based simulation. The library uses [CMake](http://www.cmake.org/), [Eigen](http://eigen.tuxfamily.org/), [json](https://github.com/nlohmann/json/), [pybind](https://github.com/pybind/pybind11), [glfw](https://www.glfw.org/), [hapPLY](https://github.com/nmwsharp/happly) and [imgui](https://github.com/ocornut/imgui) (only for the demos). All external dependencies are included. 
+## Highlights
 
-Furthermore we use our own library:
-- [Discregrid](https://github.com/InteractiveComputerGraphics/Discregrid/) to generate cubic signed distance fields for the collision detection
+- Interactive cable simulation with grab-and-drag manipulation, cutting, end pulls, gravity, and ground contact.
+- Random cable generation from reproducible seeds, plus mathematical knot presets such as `5_2`.
+- Self-collision detection with a side-switch detector and rest-state creep.
+- Tanglement analysis: hoop crossings, threading counts, knot spans, self-collision/close-pair statistics, curvature densities, and a catalog-level entanglement score.
+- Knot type detection and localization through KymoKnot (top-down search by default).
+- Unattended catalog generation, cut-heuristic evaluation, and cuts-to-zero evaluation.
+- PCA helper script for exploring catalog metrics and generating an HTML scatter plot.
 
+## Requirements
 
-**Author**: [Jan Bender](http://www.interactive-graphics.de), **License**: MIT
+- Linux (x86-64); the code uses POSIX paths such as `/proc/self/exe`.
+- CMake 3.10 or newer.
+- A C++17 compiler (the demo target explicitly requests C++17).
+- [Eigen3](https://eigen.tuxfamily.org/).
+- OpenGL and the usual X11/GLFW development packages.
+- Git and network access during the first CMake configure, because CMake fetches pinned revisions of **Discregrid** and **GenericParameters**.
+- Optional: OpenMP, Python 3 with NumPy for the PCA script.
 
-## MyCableDemo
+Most other dependencies are bundled under `extern/` (GLFW, imgui, glew, freeglut, hapPLY, md5). KymoKnot is bundled under `KymoKnot-clone/`.
 
-The `MyCableDemo` executable ([`Demos/MyCableDemo/main.cpp`](Demos/MyCableDemo/main.cpp)) is an interactive cable/tanglement simulation. It lets you drag, cut, and evaluate knots in a simulated cable, pick random/mathematical knots, and run unattended headless evaluation or catalog runs.
+On Debian/Ubuntu, a typical dependency set is:
 
-### Controls
+```bash
+sudo apt install build-essential cmake git libeigen3-dev \
+  libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
+  libxcursor-dev libxi-dev
+```
 
-**Mouse**
+## Build
 
-| Input | Action |
-| --- | --- |
-| Left-click + drag on a cable | Grab and drag the selected cable segment |
-| Left-click on a hoop marker | Select the hoop marker and print its tangle score |
-| `v` while a segment is grabbed | Enable upward pull on the selected segment |
-| Left-drag with `Alt` (on empty space) | Rotate the view |
-| Left-drag with `Shift` (on empty space) | Pan the view (x/y) |
-| Left-drag with `Ctrl` (on empty space) | Dolly the view (z) |
-| Mouse wheel | Zoom (adjust move speed) |
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+```
 
-> Clicking on a cable/hoop is handled by the demo; clicking on empty space falls through to the default camera controls.
+The executable is written to `bin/MyCableDemo` (the project sets `CMAKE_RUNTIME_OUTPUT_DIRECTORY` to `bin/`).
 
-**Keyboard**
+If you do not need the Python bindings, disable them to keep the build smaller:
 
-| Key | Action |
-| --- | --- |
-| `r` | Reset the current simulation |
-| `o` | Regenerate a random cable (new seed) |
-| `k` | Toggle the mathematical knot preset (`5_2` on first press, then back to a straight cable) |
-| `t` | Run/print the tanglement (knot) evaluation for the current cable |
-| `c` | Cut the selected cable segment (must first be grabbed/dragged) |
-| `v` | Toggle upward pull on the selected grabbed segment |
-| `g` | Toggle gravity on/off |
-| `*` | Toggle end pull forces on/off |
-| `+` / `-` | Increase / decrease the end pull strength |
-| `z` / `x` | Move the camera toward / away from the scene |
-| Arrow keys | Pan the camera (left/right/up/down) |
-| `1`–`4` | Rotate the view around the x / y axes |
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_PYTHON_BINDINGS=OFF
+```
 
-### Command-line arguments
+If Discregrid or GenericParameters are already installed, point CMake at them instead of fetching:
 
-Run `MyCableDemo` with one of the following flags. Unattended `--eval-*` / `--catalog-*` modes run headless (no interaction needed) and write their results to a file.
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DDiscregrid_INCLUDE_DIR=/path/to/include \
+  -DDiscregrid_LIB=/path/to/libDiscregrid.a \
+  -DDiscregrid_DEBUG_LIB=/path/to/libDiscregrid_d.a \
+  -DGenericParameters_INCLUDE_DIR=/path/to/include
+```
+
+### KymoKnot
+
+Knot-type analysis shells out to `KymoKnot-clone/KymoKnot_linear.x`. Build it once:
+
+```bash
+make -C KymoKnot-clone
+```
+
+If you use the binary already present in the repository, make sure it is executable:
+
+```bash
+chmod +x KymoKnot-clone/KymoKnot_linear.x
+```
+
+`MyCableDemo` looks for KymoKnot next to the executable (`bin/../KymoKnot-clone`) and falls back to `KymoKnot-clone` relative to the working directory. You can override the location:
+
+```bash
+export KYMOKNOT_ROOT="$PWD/KymoKnot-clone"
+```
+
+Without KymoKnot, the demo still runs, but knot-type reports are marked unavailable.
+
+## Running
+
+Start the interactive demo from the repository root:
+
+```bash
+./bin/MyCableDemo
+```
+
+Reproduce a specific random cable:
+
+```bash
+./bin/MyCableDemo --seed=42
+```
+
+Load a knot preset from a seed bank (the optional `:N` selects the Nth occurrence):
+
+```bash
+./bin/MyCableDemo --knot=5_2
+./bin/MyCableDemo --knot=5_2:2
+```
+
+The seed bank is not checked in. It is created/appended in `Demos/MyCableDemo/` when a run detects a knot, or you can supply your own file with `--seed-bank=<path>`. A direct `--seed` takes precedence over `--knot`.
+
+### Modes
+
+| Mode | Flags | Output |
+| --- | --- | --- |
+| Interactive | *(default)* | Live simulation and analysis in the OpenGL window |
+| Catalog generation | `--catalog-run` plus optional `--catalog-max`, `--catalog-start`, `--catalog-file` | Appends catalog rows to a TSV file |
+| Cut heuristic evaluation | `--eval-run` plus optional `--eval-output`, `--eval-random-trials` | Replaces the cut-evaluation TSV |
+| Cuts-to-zero evaluation | `--eval-cuts-to-zero` plus optional `--eval-ctz-output`, `--eval-ctz-max-cuts`, `--eval-ctz-random-trials` | Replaces the cuts-to-zero TSV |
+
+The `--eval-*` and catalog modes run without user interaction, but they still create an OpenGL window. On a machine without a display, run them under a virtual display, for example:
+
+```bash
+xvfb-run -a ./bin/MyCableDemo --catalog-run --catalog-max=10
+```
+
+Catalog mode writes one sample after the rest-state creep has settled, then regenerates the cable for the next seed. Cut evaluation and cuts-to-zero read `knotType` and `seed` columns from the catalog file, so a catalog must exist first.
+
+Example catalog run:
+
+```bash
+./bin/MyCableDemo \
+  --catalog-run \
+  --catalog-start=1000 \
+  --catalog-max=50 \
+  --catalog-file=Demos/MyCableDemo/knot_seed_catalog.tsv
+```
+
+Example cut-heuristic evaluation:
+
+```bash
+./bin/MyCableDemo \
+  --catalog-file=Demos/MyCableDemo/knot_seed_catalog.tsv \
+  --eval-run \
+  --eval-output=Demos/MyCableDemo/knot_cut_eval.tsv \
+  --eval-random-trials=10
+```
+
+Example cuts-to-zero evaluation:
+
+```bash
+./bin/MyCableDemo \
+  --catalog-file=Demos/MyCableDemo/knot_seed_catalog.tsv \
+  --eval-cuts-to-zero \
+  --eval-ctz-output=Demos/MyCableDemo/knot_cuts_to_zero.tsv \
+  --eval-ctz-max-cuts=10 \
+  --eval-ctz-random-trials=20
+```
+
+### Command-line reference
 
 | Argument | Description |
 | --- | --- |
 | `--no-cache` | Disable the framework's internal cache |
-| `--seed-bank=<path>` | Path to the knot-seed bank file |
-| `--catalog-file=<path>` | Path to the knot-seed catalog file |
-| `--seed=<n>` / `--random-seed=<n>` | Use a direct fixed RNG seed for the random cable |
-| `--knot=<name>` / `--knot-type=<name>` / `--knot <name>` | Load a specific knot seed preset by name |
-| `--catalog-run` | Run unattended catalog generation mode |
-| `--catalog-render` | Run catalog mode with rendering enabled |
-| `--catalog-steps-per-frame=<n>` | Simulation steps per frame in catalog mode (enables catalog mode) |
-| `--catalog-max=<n>` | Maximum number of catalog samples (enables catalog mode) |
-| `--catalog-start=<n>` | Starting seed for the catalog run (enables catalog mode) |
-| `--eval-run` | Run unattended cut-evaluation mode (headless) |
-| `--eval-cuts-to-zero` | Run unattended cuts-to-zero evaluation mode (headless) |
-| `--eval-output=<path>` | Output path for the cut-evaluation results |
-| `--eval-ctz-output=<path>` | Output path for the cuts-to-zero evaluation results |
-| `--eval-random-trials=<n>` | Number of random trials per sample in cut evaluation |
-| `--eval-ctz-max-cuts=<n>` | Max cuts per sample in cuts-to-zero evaluation |
-| `--eval-ctz-random-trials=<n>` | Random trials per sample in cuts-to-zero evaluation |
+| `--seed-bank=<path>` | Knot-seed preset file (default: `Demos/MyCableDemo/knot_seed_bank.txt`) |
+| `--catalog-file=<path>` | Catalog TSV for catalog output and evaluation input (default: `Demos/MyCableDemo/knot_seed_catalog.tsv`) |
+| `--seed=<n>`, `--random-seed=<n>` | Fixed RNG seed for the random cable |
+| `--knot=<name>`, `--knot-type=<name>`, `--knot <name>` | Load a named seed preset; `name:N` selects the Nth occurrence |
+| `--catalog-run` | Enable catalog mode |
+| `--catalog-render` | Keep rendering in catalog mode |
+| `--catalog-steps-per-frame=<n>` | Simulation steps per frame in catalog mode; also enables catalog mode |
+| `--catalog-max=<n>` | Stop after N catalog samples; also enables catalog mode |
+| `--catalog-start=<n>` | Start the catalog seed sequence at N; also enables catalog mode |
+| `--eval-run` | Run cut-heuristic evaluation |
+| `--eval-cuts-to-zero` | Run cuts-to-zero evaluation |
+| `--eval-output=<path>` | Output file for cut-heuristic evaluation |
+| `--eval-ctz-output=<path>` | Output file for cuts-to-zero evaluation |
+| `--eval-random-trials=<n>` | Random cut trials per sample in cut evaluation (default 10) |
+| `--eval-ctz-max-cuts=<n>` | Maximum cuts per sample in cuts-to-zero evaluation (default 10) |
+| `--eval-ctz-random-trials=<n>` | Random trials per sample in cuts-to-zero evaluation (default 20) |
 
-Example headless run:
+Default output paths are resolved relative to the executable, so running `bin/MyCableDemo` uses the checked-in `Demos/MyCableDemo/` directory. The `*_v3.tsv` files there are reference artifacts from earlier runs; the defaults use the unsuffixed names unless you pass an explicit path.
 
+## Controls
+
+### Mouse
+
+| Input | Action |
+| --- | --- |
+| Left-click + drag on a cable | Grab and drag the selected cable segment |
+| Left-click on a hoop marker | Select the hoop and print its tangle score |
+| Left-drag on empty space with `Alt` | Rotate the view |
+| Left-drag on empty space with `Shift` | Pan the view |
+| Left-drag on empty space with `Ctrl` | Dolly the view |
+| Mouse wheel | Zoom |
+
+Clicks on cables and hoop markers are handled by the demo; clicks on empty space fall through to the camera controls.
+
+### Keyboard
+
+| Key | Action |
+| --- | --- |
+| `r` | Reset the current simulation |
+| `o` | Regenerate a random cable with a new seed |
+| `k` | Toggle the mathematical knot preset (`5_2` first, then a straight cable) |
+| `t` | Run and print tanglement analysis for the current cable |
+| `c` | Cut the last selected cable segment |
+| `v` | While dragging, enable upward pull on the grabbed segment |
+| `g` | Toggle gravity |
+| `*` | Toggle end pull forces |
+| `+` / `-` | Increase / decrease end pull strength |
+| `z` / `x` | Move the camera toward / away from the scene |
+| Arrow keys | Pan the camera |
+| `1`–`4` | Rotate the view around the x / y axes |
+| `Esc` | Quit |
+
+## Analysis and data
+
+Pressing `t` prints a report containing the detected knot type(s), hoop/threading metrics, self-collision statistics, knot span, and proximity/curvature scores. Hoop markers are generated from the analysis and can be clicked for per-hoop scores.
+
+Catalog rows include, among others:
+
+- `knotType`, `seed`, `pieceIndex`, `knotCount`, `pieceCount`
+- hoop and threading counts: `totalHoopCount`, `threadedHoopCount`, `totalThreadingCount`
+- collision statistics: `selfCollisionCount`, `closePairCount`, `contactParticipationCount`, `minPairDistance`
+- topology/geometry: `knotSpanFraction`, `proximityScore`, `totalCurvatureDensity`, `outsideKnotCurvatureDensity`
+- `entanglementScore`, a catalog-normalized combination of threading, close pairs, contact participation, knot span, outside-knot curvature, extra knots, and proximity
+
+Reference artifacts in `Demos/MyCableDemo/`:
+
+| File | Purpose |
+| --- | --- |
+| `knot_seed_catalog_v3.tsv` | Full catalog example |
+| `knot_seed_catalog_v3_sorted_by_type_crossings.tsv` | Catalog sorted by knot type and crossing count |
+| `knot_seed_catalog_v3_trimmed_metrics.tsv` | Reduced metric columns |
+| `knot_seed_catalog_v3_pca_A_density.tsv` | Density-normalized PCA input |
+| `knot_seed_catalog_v3_pca_A_density_pca_*` | PCA coordinates, loadings, and plot |
+| `knot_cut_eval_v3.tsv` | Cut-heuristic evaluation example |
+| `knot_cuts_to_zero_v3.tsv` | Cuts-to-zero evaluation example |
+
+### PCA workflow
+
+After producing a density-normalized metrics table, run:
+
+```bash
+python3 Demos/MyCableDemo/run_pca.py \
+  Demos/MyCableDemo/knot_seed_catalog_v3_pca_A_density.tsv
 ```
-MyCableDemo --seed=42 --eval-run --eval-output=results.csv
+
+The script requires NumPy and writes `<prefix>_pca_coords.tsv`, `<prefix>_pca_loadings.tsv`, and `<prefix>_pca_plot.html`. Useful options:
+
+```bash
+python3 Demos/MyCableDemo/run_pca.py INPUT.tsv \
+  --features totalHoopDensity threadedHoopDensity threadingDensity \
+  --pc-count 3 \
+  --output-prefix my_analysis \
+  --title "My cable PCA" \
+  --spread 0.25
 ```
 
-## News
+## Configuration
 
-* We added a Python interface: [pyPBD](https://pypi.org/project/pyPBD/)
-* Our new [paper](https://animation.rwth-aachen.de/publication/0557/) about a Direct Position-Based Solver for Stiff Rods uses the PositionBasedDynamics library. You can watch the video  [here](https://www.youtube.com/watch?v=EFH9xt4omls).
-* PBD now has a collision detection based on cubic signed distance fields
-* SPlisHSPlasH is our new open-source fluid simulator which uses the PositionBasedDynamics library to handle rigid-fluid coupling. It can be downloaded here:
-[https://github.com/InteractiveComputerGraphics/SPlisHSPlasH](https://github.com/InteractiveComputerGraphics/SPlisHSPlasH)
-* Our new [paper](http://interactive-graphics.de/index.php/research/98-hierarchical-hp-adaptive-signed-distance-fields) about adaptive signed distance fields uses the PositionBasedDynamics library. You can watch the video  [here](https://www.youtube.com/watch?v=x_Iq2yM4FcA).
+Most simulation defaults live in [`Demos/MyCableDemo/CablePhysics.h`](Demos/MyCableDemo/CablePhysics.h):
 
-## Documentation
+- `RopeConfig`: rod stiffness, segment length, render radius
+- `PhysicsConfig`: time step, end-pull spring/damping, velocity blending
+- `RandomCableConfig`: control-point count, lateral bounds, smoothing, seed
+- `SelfCollisionConfig`: radius, compliance, iterations, damping, hash cell size
+- `RestShapeCreepConfig`: rest-shape creep activation and rate
 
-The documentation can be found here: 
+Scene construction, keyboard bindings, evaluation orchestration, and output paths are in [`Demos/MyCableDemo/main.cpp`](Demos/MyCableDemo/main.cpp).
 
-* [Documentation](https://positionbaseddynamics.readthedocs.io)
+## Repository layout
 
-## Forum
+| Path | Contents |
+| --- | --- |
+| `Demos/MyCableDemo/` | Cable demo, physics helpers, analyzers, evaluation data, PCA script |
+| `Demos/Visualization/` | OpenGL/imgui visualization helpers |
+| `PositionBasedDynamics/` | PBD/XPBD constraint library |
+| `Simulation/` | Simulation framework |
+| `Utils/` | File system, scene loading, and utility code |
+| `extern/` | Bundled third-party libraries |
+| `KymoKnot-clone/` | Bundled KymoKnot knot analyzer |
+| `data/` | Shaders, models, and scene data |
+| `bin/` | Build output (ignored by Git) |
+| `build/` | CMake build tree (ignored by Git) |
 
-On our [GitHub discussions](https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/discussions) page you can ask questions, discuss about simulation topics, and share ideas.
+## Troubleshooting
 
-## Build Instructions
+- **KymoKnot reports unavailable**: build `KymoKnot-clone` with `make -C KymoKnot-clone`, ensure `KymoKnot_linear.x` is executable, or set `KYMOKNOT_ROOT`.
+- **CMake configure fails while cloning Discregrid/GenericParameters**: check Git/network access or provide the preinstalled paths shown above.
+- **Evaluation mode fails to open a window**: unattended modes still need an OpenGL context; use `xvfb-run -a`.
+- **Seed bank or catalog not found**: pass `--seed-bank` / `--catalog-file`, or run from the repository root so the default paths resolve.
+- **Knot type looks wrong for complex knots**: KymoKnot uses Alexander determinants at `t=-1` and `t=-2`; complex knots can share determinants with other knots. See `KymoKnot-clone/README.md` for details.
 
-This project is based on [CMake](https://cmake.org/). Simply generate project, Makefiles, etc. using [CMake](https://cmake.org/) and compile the project with the compiler of your choice. The code was tested with the following configurations:
-- Windows 10 64-bit, CMake 3.9.5, Visual Studio 2019
-- Debian 9 64-bit, CMake 3.12.3, GCC 6.3.0.
+## License and upstream
 
-Note: Please use a 64-bit target on a 64-bit operating system. 32-bit builds on a 64-bit OS are not supported.
+CableSim is distributed under the MIT license; see [`LICENSE`](LICENSE). It is based on PositionBasedDynamics by Jan Bender and contributors. KymoKnot is a separate package with its own license in [`KymoKnot-clone/COPYING.txt`](KymoKnot-clone/COPYING.txt).
 
-## Python Installation Instruction
+Selected references:
 
-For Windows and Linux targets there exists prebuilt python wheel files which can be installed using
-
-```
-pip install pypbd
-```
-
-These are available for different Python Versions. See also here: [pyPBD](https://pypi.org/project/pyPBD/).
-If you do not meet these conditions please refer to the build instructions and to the python binding 
-[Getting started guide](https://positionbaseddynamics.readthedocs.io/en/latest/py_getting_started.html).
-
-## Latest Important Changes
-
-* GUI is now based on [imgui](https://github.com/ocornut/imgui)
-* added support of PLY files
-* added Python binding
-* added some XPBD constraints
-* added OBJ export
-* added substepping
-* added DamperJoint
-* improved implementation of slider and hinge joints/motors
-* Crispin Deul added the implementation of his paper Deul, Kugelstadt, Weiler, Bender, "Direct Position-Based Solver for Stiff Rods", Computer Graphics Forum 2018 and a corresponding demo
-* added collision detection for arbitrary meshes based on cubic signed distance fields
-* added implementation of the paper Kugelstadt, Schoemer, "Position and Orientation Based Cosserat Rods", SCA 2016
-* removed Boost dependency
-* added SceneGenerator.py to generate new scenarios easily by simple Python scripting
-* added scene loader based on json 
-* added collision detection based on distance functions
-* added collision handling for rigid and deformable bodies
-* high resolution visualization mesh can be attached to a deformable body
-* added support for Mac OS X
-* added automatic computation of inertia tensor for arbitrary triangle meshes
-* added OBJ file loader
-* parallelized unified solver using graph coloring
-* implemented unified solver for rigid bodies and deformable solids 
-
-
-
-## Features
-
-* Physically-based simulation with (eXtended) position-based constraint handling.
-* Simple interface
-* Demos 
-* Library is free even for commercial applications.
-* Collision detection based on cubic signed distance fields
-* Library supports many constraints: 
-	- Elastic rods:
-		- bend-twist constraint
-		- stretch-shear constraint
-		- Cosserat constraint
-	- Deformable solids:		
-		- point-point distance constraint (PBD & XPBD)
-		- point-edge distance constraint
-		- point-triangle distance constraint
-		- edge-edge distance constraint
-		- dihedral bending constraint
-		- isometric bending constraint (PBD & XPBD)
-		- volume constraint (PBD & XPBD)
-		- shape matching
-		- FEM-based PBD (2D & 3D)
-		- strain-based dynamics (2D & 3D)
-	- Fluids:
-		- position-based fluids 
-	- Rigid bodies:
-		- contact constraints
-		- ball joint
-		- ball-on-line-joint
-		- hinge joint
-		- target angle motor hinge joint
-		- target velocity motor hinge joint
-		- universal joint
-		- slider joint
-		- target position motor slider joint
-		- target velocity motor slider joint
-		- ball joint between rigid body and particle
-		- distance joint
-		- damper joint
-		- implicit spring
-	- Generic constraints
-
-## Videos
-
-The following videos were generated using the PositionBasedDynamics library:
-
-*Hierarchical hp-Adaptive Signed Distance Fields* | *Direct Position-Based Solver for Stiff Rods*
-:---:|:---:
-[![Video](https://img.youtube.com/vi/x_Iq2yM4FcA/0.jpg)](https://www.youtube.com/watch?v=x_Iq2yM4FcA) | [![Video](https://img.youtube.com/vi/EFH9xt4omls/0.jpg)](https://www.youtube.com/watch?v=EFH9xt4omls)
-
-
-## Screenshots
-
-|![](https://raw.githubusercontent.com/InteractiveComputerGraphics/PositionBasedDynamics/master/doc/images/PBD1.jpg)|![](https://raw.githubusercontent.com/InteractiveComputerGraphics/PositionBasedDynamics/master/doc/images/PBD2.jpg)|
-|--|--|
-
-## References
-
-* J. Bender, M. Müller and M. Macklin, "Position-Based Simulation Methods in Computer Graphics", In Tutorial Proceedings of Eurographics, 2015
-* J. Bender, D. Koschier, P. Charrier and D. Weber, ""Position-based simulation of continuous materials", Computers & Graphics 44, 2014
-* J. Bender, M. Müller, M. A. Otaduy, M. Teschner and M. Macklin, "A Survey on Position-Based Simulation Methods in Computer Graphics", Computer Graphics Forum 33, 6, 2014
-* C. Deul, T. Kugelstadt, M. Weiler, J. Bender, "Direct Position-Based Solver for Stiff Rods", Computer Graphics Forum, 2018
-* C. Deul, P. Charrier and J. Bender, "Position-Based Rigid Body Dynamics", Computer Animation and Virtual Worlds, 2014
-* D. Koschier, C. Deul, M. Brand and J. Bender, "An hp-Adaptive Discretization Algorithm for Signed Distance Field Generation", IEEE Transactions on Visualization and Computer Graphics 23, 2017
-* M. Macklin, M. Müller, N. Chentanez and T.Y. Kim, "Unified particle physics for real-time applications", ACM Trans. Graph. 33, 4, 2014
-* M. Müller, N. Chentanez, T.Y. Kim, M. Macklin, "Strain based dynamics", In Proceedings of the 2014 ACM
-SIGGRAPH/Eurographics Symposium on Computer Animation, 2014
-* J. Bender, D. Weber and R. Diziol, "Fast and stable cloth simulation based on multi-resolution shape matching", Computers & Graphics 37, 8, 2013
-* R. Diziol, J. Bender and D. Bayer, "Robust Real-Time Deformation of Incompressible Surface Meshes", In Proceedings of ACM SIGGRAPH / EUROGRAPHICS Symposium on Computer Animation (SCA), 2011
-* M. Müller and N. Chentanez, "Solid simulation with oriented particles", ACM Trans. Graph. 30, 4, 2011
-* M. Müller, "Hierarchical Position Based Dynamics", In VRIPHYS 08: Fifth Workshop in Virtual Reality Interactions and Physical Simulations, 2008 
-* M. Müller, B. Heidelberger, M. Hennix and J. Ratcliff, "Position based dynamics", Journal of Visual Communication and Image Representation 18, 2, 2007
-* M. Müller, B. Heidelberger, M. Teschner and M. Gross, "Meshless deformations based on shape matching", ACM Trans. Graph. 24, 3, 2005
-* M. Macklin and M. Müller, "Position based fluids", ACM Trans. Graph. 32, 4, 2013
-* Dan Koschier, Crispin Deul and Jan Bender, "Hierarchical hp-Adaptive Signed Distance Fields", In Proceedings of ACM SIGGRAPH / EUROGRAPHICS Symposium on Computer Animation (SCA), 2016
-* Tassilo Kugelstadt, Elmar Schoemer, "Position and Orientation Based Cosserat Rods", In Proceedings of ACM SIGGRAPH / EUROGRAPHICS Symposium on Computer Animation (SCA), 2016
-* M. Macklin, M. Müller and N. Chentanez, "XPBD: Position-based Simulation of Compliant Constrained Dynamics", Proceedings of the 9th International Conference on Motion in Games (MIG), 2016
-
-
-
+- J. Bender, M. Müller, M. Macklin, "Position-Based Simulation Methods in Computer Graphics", Eurographics Tutorial, 2015.
+- C. Deul, T. Kugelstadt, M. Weiler, J. Bender, "Direct Position-Based Solver for Stiff Rods", Computer Graphics Forum, 2018.
+- T. Kugelstadt, E. Schoemer, "Position and Orientation Based Cosserat Rods", SCA, 2016.
+- L. Tubiana, E. Orlandini, C. Micheletti, "Probing the Entanglement and Locating Knots in Ring Polymers", Progress of Theoretical Physics Supplement, 2011.
