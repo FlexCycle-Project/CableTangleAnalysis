@@ -2,3 +2,5 @@ lib/
 bin/
 !bin/*.bat
 build/*
+opencode.json
+results/

@@ -2185,7 +2185,9 @@ static void timeStep()
                 {
                     g_catalogRunEnabled = false;
                     std::cout << "[knot-catalog] reached maxSamples="
-                              << g_catalogSamplesWritten << std::endl;
+                              << g_catalogSamplesWritten
+                              << ", output=" << g_knotSeedCatalogPath << std::endl;
+                    MiniGL::leaveMainLoop();
                     return;
                 }
 

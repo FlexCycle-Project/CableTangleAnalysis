@@ -119,7 +119,7 @@ The `--eval-*` and catalog modes run without user interaction, but they still cr
 xvfb-run -a ./bin/MyCableDemo --catalog-run --catalog-max=10
 ```
 
-Catalog mode writes one sample after the rest-state creep has settled, then regenerates the cable for the next seed. Cut evaluation and cuts-to-zero read `knotType` and `seed` columns from the catalog file, so a catalog must exist first.
+Catalog mode writes one sample after the rest-state creep has settled, then regenerates the cable for the next seed. When `--catalog-max` is reached, it logs the output path and exits automatically. Cut evaluation and cuts-to-zero read `knotType` and `seed` columns from the catalog file, so a catalog must exist first.
 
 Example catalog run:
 
@@ -151,6 +151,18 @@ Example cuts-to-zero evaluation:
   --eval-ctz-max-cuts=10 \
   --eval-ctz-random-trials=20
 ```
+
+### Full parallel pipeline
+
+[`scripts/run_full_pipeline.sh`](scripts/run_full_pipeline.sh) runs the catalog and both evaluations for a seed range, split across parallel workers:
+
+```bash
+scripts/run_full_pipeline.sh --start 1 --end 1000 --workers 8
+```
+
+Results are written to `results/catalog_<timestamp>/` as `catalog.tsv`, `cut_eval.tsv`, and `cuts_to_zero.tsv`, with per-worker logs under `logs/`. The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window.
+
+Use `--help` for all options. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds.
 
 ### Command-line reference
 
