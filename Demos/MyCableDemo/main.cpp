@@ -345,7 +345,9 @@ static bool prepareCutEvalOutputFile()
     }
 
     out << "seed\tknotType\tT_before\tdelta_heuristic\tdelta_random_mean"
-        << "\tdelta_random_std\theuristic_hoop_score\tskipped\n";
+        << "\tdelta_random_std\theuristic_hoop_score\tskipped"
+        << "\tdelta_random_hoop_mean\tdelta_random_hoop_std\tdelta_biggest_hoop"
+        << "\tbiggest_hoop_span\tbiggest_hoop_score\thoop_count\n";
     return true;
 }
 
@@ -363,7 +365,9 @@ static bool prepareCutsToZeroEvalOutputFile()
     }
 
     out << "seed\tknotType\tT_before\theuristic_cuts\theuristic_resolved"
-        << "\trandom_cuts_mean\trandom_cuts_std\trandom_resolved_rate\n";
+        << "\trandom_cuts_mean\trandom_cuts_std\trandom_resolved_rate"
+        << "\trandom_hoop_cuts_mean\trandom_hoop_cuts_std\trandom_hoop_resolved_rate"
+        << "\tbiggest_hoop_cuts\tbiggest_hoop_resolved\thoop_count\n";
     return true;
 }
 
@@ -949,45 +953,99 @@ namespace
         size_t pieceIndex = std::numeric_limits<size_t>::max();
         size_t edgeIndex = std::numeric_limits<size_t>::max();
         int hoopScore = 0;
+        int hoopSpan = 0;
         bool valid = false;
     };
 
-    static VirtualCutTarget findBestHoopMidpointCut(
+    static bool makeHoopMidpointCutTarget(
+        size_t pieceIndex,
+        const std::vector<Vector3r>& piece,
+        const TanglementAnalyzer::HoopCandidate& hoop,
+        VirtualCutTarget& target)
+    {
+        if (piece.size() < 4 || hoop.pairSumScore <= 0)
+            return false;
+
+        const size_t maxEdge = piece.size() - 2;
+        const int rawMidpoint = (hoop.startEdge + hoop.endEdge) / 2;
+        const size_t edgeIndex = static_cast<size_t>(
+            std::max(1, std::min(rawMidpoint, static_cast<int>(maxEdge - 1))));
+        if (edgeIndex + 2 >= piece.size())
+            return false;
+
+        target.pieceIndex = pieceIndex;
+        target.edgeIndex = edgeIndex;
+        target.hoopScore = hoop.pairSumScore;
+        target.hoopSpan = hoop.endEdge - hoop.startEdge;
+        target.valid = true;
+        return true;
+    }
+
+    static std::vector<VirtualCutTarget> collectHoopCutTargets(
         const TanglementAnalyzer::TanglementAnalysisResult& tanglement,
         const std::vector<std::vector<Vector3r>>& ropePieces)
     {
-        VirtualCutTarget best;
+        std::vector<VirtualCutTarget> targets;
         for (size_t pieceIndex = 0; pieceIndex < tanglement.scoredHoops.size(); ++pieceIndex)
         {
             if (pieceIndex >= ropePieces.size())
                 continue;
 
             const std::vector<Vector3r>& piece = ropePieces[pieceIndex];
-            if (piece.size() < 4)
-                continue;
-
-            const size_t maxEdge = piece.size() - 2;
             for (const TanglementAnalyzer::HoopCandidate& hoop : tanglement.scoredHoops[pieceIndex])
             {
-                if (hoop.pairSumScore <= 0)
-                    continue;
+                VirtualCutTarget target;
+                if (makeHoopMidpointCutTarget(pieceIndex, piece, hoop, target))
+                    targets.push_back(target);
+            }
+        }
+        return targets;
+    }
 
-                const int rawMidpoint = (hoop.startEdge + hoop.endEdge) / 2;
-                const size_t edgeIndex = static_cast<size_t>(
-                    std::max(1, std::min(rawMidpoint, static_cast<int>(maxEdge - 1))));
-                if (edgeIndex + 2 >= piece.size())
-                    continue;
+    static VirtualCutTarget findBestHoopMidpointCut(
+        const TanglementAnalyzer::TanglementAnalysisResult& tanglement,
+        const std::vector<std::vector<Vector3r>>& ropePieces)
+    {
+        VirtualCutTarget best;
+        for (const VirtualCutTarget& candidate : collectHoopCutTargets(tanglement, ropePieces))
+        {
+            if (!best.valid || candidate.hoopScore > best.hoopScore)
+                best = candidate;
+        }
+        return best;
+    }
 
-                if (!best.valid || hoop.pairSumScore > best.hoopScore)
-                {
-                    best.pieceIndex = pieceIndex;
-                    best.edgeIndex = edgeIndex;
-                    best.hoopScore = hoop.pairSumScore;
-                    best.valid = true;
-                }
+    static VirtualCutTarget findBiggestHoopMidpointCut(
+        const TanglementAnalyzer::TanglementAnalysisResult& tanglement,
+        const std::vector<std::vector<Vector3r>>& ropePieces)
+    {
+        VirtualCutTarget best;
+        for (const VirtualCutTarget& candidate : collectHoopCutTargets(tanglement, ropePieces))
+        {
+            if (!best.valid ||
+                candidate.hoopSpan > best.hoopSpan ||
+                (candidate.hoopSpan == best.hoopSpan && candidate.hoopScore > best.hoopScore))
+            {
+                best = candidate;
             }
         }
         return best;
+    }
+
+    static bool selectRandomHoopCutTarget(
+        const TanglementAnalyzer::TanglementAnalysisResult& tanglement,
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        std::mt19937& rng,
+        VirtualCutTarget& target)
+    {
+        const std::vector<VirtualCutTarget> targets =
+            collectHoopCutTargets(tanglement, ropePieces);
+        if (targets.empty())
+            return false;
+
+        std::uniform_int_distribution<size_t> dist(0, targets.size() - 1);
+        target = targets[dist(rng)];
+        return target.valid;
     }
 
     static std::vector<VirtualCutTarget> collectValidRandomCutTargets(
@@ -1096,6 +1154,82 @@ namespace
         return outcome;
     }
 
+    static CutsToZeroOutcome runBiggestHoopCutsToZero(
+        const std::vector<std::vector<Vector3r>>& startPieces,
+        unsigned int maxCuts)
+    {
+        std::vector<std::vector<Vector3r>> pieces = startPieces;
+        CutsToZeroOutcome outcome;
+
+        while (outcome.cuts < maxCuts)
+        {
+            const TanglementAnalyzer::TanglementAnalysisResult tanglement =
+                TanglementAnalyzer::analyzeTanglementGeometryOnly(
+                    pieces,
+                    {},
+                    g_cfg.rope,
+                    g_cfg.selfCollision);
+            const int threading =
+                TanglementAnalyzer::computeThreadingMetrics(tanglement).totalThreadingCount;
+            if (threading == 0)
+            {
+                outcome.resolved = true;
+                return outcome;
+            }
+
+            const VirtualCutTarget target = findBiggestHoopMidpointCut(tanglement, pieces);
+            if (!target.valid || !splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
+                break;
+
+            ++outcome.cuts;
+        }
+
+        outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
+        if (!outcome.resolved)
+            outcome.cuts = maxCuts;
+        return outcome;
+    }
+
+    static CutsToZeroOutcome runRandomHoopCutsToZero(
+        const std::vector<std::vector<Vector3r>>& startPieces,
+        unsigned int maxCuts,
+        std::mt19937& rng)
+    {
+        std::vector<std::vector<Vector3r>> pieces = startPieces;
+        CutsToZeroOutcome outcome;
+
+        while (outcome.cuts < maxCuts)
+        {
+            const TanglementAnalyzer::TanglementAnalysisResult tanglement =
+                TanglementAnalyzer::analyzeTanglementGeometryOnly(
+                    pieces,
+                    {},
+                    g_cfg.rope,
+                    g_cfg.selfCollision);
+            const int threading =
+                TanglementAnalyzer::computeThreadingMetrics(tanglement).totalThreadingCount;
+            if (threading == 0)
+            {
+                outcome.resolved = true;
+                return outcome;
+            }
+
+            VirtualCutTarget target;
+            if (!selectRandomHoopCutTarget(tanglement, pieces, rng, target) ||
+                !splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
+            {
+                break;
+            }
+
+            ++outcome.cuts;
+        }
+
+        outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
+        if (!outcome.resolved)
+            outcome.cuts = maxCuts;
+        return outcome;
+    }
+
     static CutsToZeroOutcome runRandomCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
         unsigned int maxCuts,
@@ -1153,6 +1287,9 @@ static void evaluateAndRecordCutHeuristicSample()
     const TanglementAnalyzer::ThreadingMetricsSnapshot threading =
         TanglementAnalyzer::computeThreadingMetrics(tanglement);
     const int beforeThreading = threading.totalThreadingCount;
+    const std::vector<VirtualCutTarget> hoopTargets =
+        collectHoopCutTargets(tanglement, ropePieces);
+    const int hoopCount = static_cast<int>(hoopTargets.size());
 
     int skipped = 0;
     int heuristicDelta = 0;
@@ -1171,6 +1308,24 @@ static void evaluateAndRecordCutHeuristicSample()
         else
         {
             skipped = 1;
+        }
+    }
+
+    int biggestHoopDelta = 0;
+    int biggestHoopSpan = 0;
+    int biggestHoopScore = 0;
+    if (beforeThreading > 0)
+    {
+        const VirtualCutTarget biggestTarget =
+            findBiggestHoopMidpointCut(tanglement, ropePieces);
+        if (biggestTarget.valid)
+        {
+            biggestHoopDelta = computeVirtualCutDeltaThreading(
+                ropePieces,
+                beforeThreading,
+                biggestTarget);
+            biggestHoopSpan = biggestTarget.hoopSpan;
+            biggestHoopScore = biggestTarget.hoopScore;
         }
     }
 
@@ -1210,6 +1365,37 @@ static void evaluateAndRecordCutHeuristicSample()
         }
     }
 
+    Real randomHoopMean = static_cast<Real>(0.0);
+    Real randomHoopStd = static_cast<Real>(0.0);
+    if (beforeThreading > 0 && !hoopTargets.empty() && g_evalRandomTrials > 0)
+    {
+        std::mt19937 rng(record.seed ^ 0xA5A5A5A5u);
+        std::uniform_int_distribution<size_t> dist(0, hoopTargets.size() - 1);
+        std::vector<Real> randomHoopDeltas;
+        randomHoopDeltas.reserve(g_evalRandomTrials);
+
+        for (unsigned int trial = 0; trial < g_evalRandomTrials; ++trial)
+        {
+            const VirtualCutTarget& randomHoopTarget = hoopTargets[dist(rng)];
+            const int delta = computeVirtualCutDeltaThreading(
+                ropePieces,
+                beforeThreading,
+                randomHoopTarget);
+            randomHoopDeltas.push_back(static_cast<Real>(delta));
+            randomHoopMean += static_cast<Real>(delta);
+        }
+
+        randomHoopMean /= static_cast<Real>(randomHoopDeltas.size());
+        Real variance = static_cast<Real>(0.0);
+        for (Real delta : randomHoopDeltas)
+        {
+            const Real d = delta - randomHoopMean;
+            variance += d * d;
+        }
+        variance /= static_cast<Real>(randomHoopDeltas.size());
+        randomHoopStd = std::sqrt(variance);
+    }
+
     std::ofstream out(g_evalOutputPath, std::ios::app);
     if (!out)
     {
@@ -1226,7 +1412,13 @@ static void evaluateAndRecordCutHeuristicSample()
         << randomMean << '\t'
         << randomStd << '\t'
         << heuristicHoopScore << '\t'
-        << skipped << '\n';
+        << skipped << '\t'
+        << randomHoopMean << '\t'
+        << randomHoopStd << '\t'
+        << biggestHoopDelta << '\t'
+        << biggestHoopSpan << '\t'
+        << biggestHoopScore << '\t'
+        << hoopCount << '\n';
 
     ++g_evalSamplesWritten;
     std::cout << "[cut-eval] seed=" << record.seed
@@ -1234,6 +1426,9 @@ static void evaluateAndRecordCutHeuristicSample()
               << " T_before=" << beforeThreading
               << " heuristicDelta=" << heuristicDelta
               << " randomMean=" << randomMean
+              << " randomHoopMean=" << randomHoopMean
+              << " biggestHoopDelta=" << biggestHoopDelta
+              << " hoops=" << hoopCount
               << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
               << std::endl;
 }
@@ -1249,26 +1444,42 @@ static void evaluateAndRecordCutsToZeroSample()
 
     const CutEvalSeedRecord& record = g_evalSeeds[g_evalCurrentIndex];
     const std::vector<std::vector<Vector3r>> ropePieces = collectCurrentCablePieces(model);
-    const int beforeThreading = computeThreadingCountGeometryOnly(ropePieces);
+    const TanglementAnalyzer::TanglementAnalysisResult initialTanglement =
+        TanglementAnalyzer::analyzeTanglementGeometryOnly(
+            ropePieces,
+            {},
+            g_cfg.rope,
+            g_cfg.selfCollision);
+    const int beforeThreading =
+        TanglementAnalyzer::computeThreadingMetrics(initialTanglement).totalThreadingCount;
+    const int hoopCount =
+        static_cast<int>(collectHoopCutTargets(initialTanglement, ropePieces).size());
 
     CutsToZeroOutcome heuristicOutcome;
+    CutsToZeroOutcome biggestHoopOutcome;
     Real randomMean = static_cast<Real>(0.0);
     Real randomStd = static_cast<Real>(0.0);
     Real randomResolvedRate = static_cast<Real>(1.0);
+    Real randomHoopMean = static_cast<Real>(0.0);
+    Real randomHoopStd = static_cast<Real>(0.0);
+    Real randomHoopResolvedRate = static_cast<Real>(1.0);
 
     if (beforeThreading == 0)
     {
         heuristicOutcome.resolved = true;
+        biggestHoopOutcome.resolved = true;
     }
     else
     {
         heuristicOutcome = runHeuristicCutsToZero(
             ropePieces,
             g_evalCutsToZeroMaxCuts);
+        biggestHoopOutcome = runBiggestHoopCutsToZero(
+            ropePieces,
+            g_evalCutsToZeroMaxCuts);
 
         randomResolvedRate = static_cast<Real>(0.0);
-        std::random_device rd;
-        std::mt19937 rng(rd());
+        std::mt19937 edgeRng(record.seed ^ 0x9E3779B9u);
         std::vector<Real> randomCuts;
         randomCuts.reserve(g_evalCutsToZeroRandomTrials);
 
@@ -1278,7 +1489,7 @@ static void evaluateAndRecordCutsToZeroSample()
                 runRandomCutsToZero(
                     ropePieces,
                     g_evalCutsToZeroMaxCuts,
-                    rng);
+                    edgeRng);
             randomCuts.push_back(static_cast<Real>(randomOutcome.cuts));
             randomMean += static_cast<Real>(randomOutcome.cuts);
             if (randomOutcome.resolved)
@@ -1297,6 +1508,38 @@ static void evaluateAndRecordCutsToZeroSample()
             }
             variance /= static_cast<Real>(randomCuts.size());
             randomStd = std::sqrt(variance);
+        }
+
+        randomHoopResolvedRate = static_cast<Real>(0.0);
+        std::mt19937 hoopRng(record.seed ^ 0xA5A5A5A5u);
+        std::vector<Real> randomHoopCuts;
+        randomHoopCuts.reserve(g_evalCutsToZeroRandomTrials);
+
+        for (unsigned int trial = 0; trial < g_evalCutsToZeroRandomTrials; ++trial)
+        {
+            const CutsToZeroOutcome randomHoopOutcome =
+                runRandomHoopCutsToZero(
+                    ropePieces,
+                    g_evalCutsToZeroMaxCuts,
+                    hoopRng);
+            randomHoopCuts.push_back(static_cast<Real>(randomHoopOutcome.cuts));
+            randomHoopMean += static_cast<Real>(randomHoopOutcome.cuts);
+            if (randomHoopOutcome.resolved)
+                randomHoopResolvedRate += static_cast<Real>(1.0);
+        }
+
+        if (!randomHoopCuts.empty())
+        {
+            randomHoopMean /= static_cast<Real>(randomHoopCuts.size());
+            randomHoopResolvedRate /= static_cast<Real>(randomHoopCuts.size());
+            Real variance = static_cast<Real>(0.0);
+            for (Real cuts : randomHoopCuts)
+            {
+                const Real d = cuts - randomHoopMean;
+                variance += d * d;
+            }
+            variance /= static_cast<Real>(randomHoopCuts.size());
+            randomHoopStd = std::sqrt(variance);
         }
     }
 
@@ -1317,7 +1560,13 @@ static void evaluateAndRecordCutsToZeroSample()
         << (heuristicOutcome.resolved ? 1 : 0) << '\t'
         << randomMean << '\t'
         << randomStd << '\t'
-        << randomResolvedRate << '\n';
+        << randomResolvedRate << '\t'
+        << randomHoopMean << '\t'
+        << randomHoopStd << '\t'
+        << randomHoopResolvedRate << '\t'
+        << biggestHoopOutcome.cuts << '\t'
+        << (biggestHoopOutcome.resolved ? 1 : 0) << '\t'
+        << hoopCount << '\n';
 
     ++g_evalSamplesWritten;
     std::cout << "[cuts-to-zero] seed=" << record.seed
@@ -1327,6 +1576,11 @@ static void evaluateAndRecordCutsToZeroSample()
               << " heuristicResolved=" << (heuristicOutcome.resolved ? 1 : 0)
               << " randomMean=" << randomMean
               << " randomResolvedRate=" << randomResolvedRate
+              << " randomHoopMean=" << randomHoopMean
+              << " randomHoopResolvedRate=" << randomHoopResolvedRate
+              << " biggestHoopCuts=" << biggestHoopOutcome.cuts
+              << " biggestHoopResolved=" << (biggestHoopOutcome.resolved ? 1 : 0)
+              << " hoops=" << hoopCount
               << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
               << std::endl;
 }

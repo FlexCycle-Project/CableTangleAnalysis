@@ -164,6 +164,25 @@ Results are written to `results/catalog_<timestamp>/` as `catalog.tsv`, `cut_eva
 
 Use `--help` for all options. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds.
 
+### Cut strategies
+
+The evaluation modes compare four cut strategies:
+
+| Strategy | Selection |
+| --- | --- |
+| Heuristic | Hoop with the highest `pairSumScore` |
+| Random edge | Uniformly random valid cable edge (existing baseline) |
+| Random hoop | Uniformly random hoop with a positive score |
+| Biggest hoop | Hoop with the largest edge span (`endEdge - startEdge`), tie-broken by score |
+
+Hoop-based strategies cut at the hoop midpoint. Random strategies use a per-seed RNG, so their results are reproducible. `--eval-random-trials` controls both random-edge and random-hoop trials in cut evaluation; `--eval-ctz-random-trials` controls both for cuts-to-zero.
+
+Cut evaluation appends these columns:
+`delta_random_hoop_mean`, `delta_random_hoop_std`, `delta_biggest_hoop`, `biggest_hoop_span`, `biggest_hoop_score`, `hoop_count`.
+
+Cuts-to-zero appends:
+`random_hoop_cuts_mean`, `random_hoop_cuts_std`, `random_hoop_resolved_rate`, `biggest_hoop_cuts`, `biggest_hoop_resolved`, `hoop_count`.
+
 ### Command-line reference
 
 | Argument | Description |
@@ -182,9 +201,9 @@ Use `--help` for all options. Note that seed `0` is normalized to `1` by `MyCabl
 | `--eval-cuts-to-zero` | Run cuts-to-zero evaluation |
 | `--eval-output=<path>` | Output file for cut-heuristic evaluation |
 | `--eval-ctz-output=<path>` | Output file for cuts-to-zero evaluation |
-| `--eval-random-trials=<n>` | Random cut trials per sample in cut evaluation (default 10) |
+| `--eval-random-trials=<n>` | Random edge/hoop trials per sample in cut evaluation (default 10) |
 | `--eval-ctz-max-cuts=<n>` | Maximum cuts per sample in cuts-to-zero evaluation (default 10) |
-| `--eval-ctz-random-trials=<n>` | Random trials per sample in cuts-to-zero evaluation (default 20) |
+| `--eval-ctz-random-trials=<n>` | Random edge/hoop trials per sample in cuts-to-zero evaluation (default 20) |
 
 Default output paths are resolved relative to the executable, so running `bin/MyCableDemo` uses the checked-in `Demos/MyCableDemo/` directory. The `*_v3.tsv` files there are reference artifacts from earlier runs; the defaults use the unsuffixed names unless you pass an explicit path.
 
@@ -244,6 +263,8 @@ Reference artifacts in `Demos/MyCableDemo/`:
 | `knot_seed_catalog_v3_pca_A_density_pca_*` | PCA coordinates, loadings, and plot |
 | `knot_cut_eval_v3.tsv` | Cut-heuristic evaluation example |
 | `knot_cuts_to_zero_v3.tsv` | Cuts-to-zero evaluation example |
+
+The checked-in `knot_cut_eval_v3.tsv` and `knot_cuts_to_zero_v3.tsv` files predate the random-hoop and biggest-hoop strategies; new evaluation runs include the additional columns.
 
 ### PCA workflow
 
