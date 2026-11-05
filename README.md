@@ -10,6 +10,7 @@ This branch (`linux`) contains the Linux port of the demo and the batch analysis
 - Random cable generation from reproducible seeds, plus mathematical knot presets such as `5_2`.
 - Self-collision detection with a side-switch detector and rest-state creep.
 - Tanglement analysis: hoop crossings, threading counts, knot spans, self-collision/close-pair statistics, curvature densities, and a catalog-level entanglement score.
+- PCA-derived complexity score trained on non-threading geometric metrics.
 - Knot type detection and localization through KymoKnot (top-down search by default).
 - Unattended catalog generation, cut-heuristic evaluation, and cuts-to-zero evaluation.
 - PCA helper script for exploring catalog metrics and generating an HTML scatter plot.
@@ -22,14 +23,15 @@ This branch (`linux`) contains the Linux port of the demo and the batch analysis
 - [Eigen3](https://eigen.tuxfamily.org/).
 - OpenGL and the usual X11/GLFW development packages.
 - Git and network access during the first CMake configure, because CMake fetches pinned revisions of **Discregrid** and **GenericParameters**.
-- Optional: OpenMP, Python 3 with NumPy for the PCA script.
+- Optional: OpenMP.
+- Python 3 with NumPy for the PCA complexity pass (skip it with `--no-complexity`).
 
 Most other dependencies are bundled under `extern/` (GLFW, imgui, glew, freeglut, hapPLY, md5). KymoKnot is bundled under `KymoKnot-clone/`.
 
 On Debian/Ubuntu, a typical dependency set is:
 
 ```bash
-sudo apt install build-essential cmake git libeigen3-dev \
+sudo apt install build-essential cmake git libeigen3-dev python3-numpy \
   libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
   libxcursor-dev libxi-dev
 ```
@@ -174,6 +176,8 @@ The script also sets `--creep-settle-steps=300` and lowers the creep activation 
 
 The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window. It runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds. Running all three creep variants takes roughly three times as long as a single variant.
 
+After the simulation stages it runs [`scripts/compute_complexity.py`](scripts/compute_complexity.py), which fits the PCA complexity model and joins the resulting score into the catalog and strategy outputs under `complexity/`. This requires Python 3 with NumPy. Pass `--no-complexity` to skip it.
+
 ### Cut strategies
 
 The evaluation modes compare these cut strategies:
@@ -197,6 +201,45 @@ Cut evaluation appends these columns:
 
 Cuts-to-zero appends:
 `random_hoop_cuts_mean`, `random_hoop_cuts_std`, `random_hoop_resolved_rate`, `biggest_hoop_cuts`, `biggest_hoop_resolved`, `hoop_count`, `smallest_hoop_cuts`, `smallest_hoop_resolved`, `max_curvature_cuts`, `max_curvature_resolved`.
+
+### Complexity score
+
+The complexity score is computed after catalog generation by `scripts/compute_complexity.py`. It fits a PCA on five geometric metrics that do not directly determine the threading count:
+
+```text
+segmentCount
+selfCollisionCount
+closePairCount
+totalCurvature
+outsideKnotCurvature
+```
+
+The first principal component is used as the metric weighting. The score is the PC1 projection of the standardized metrics; the loadings are written to `complexity_model.tsv`. PC1 is sign-oriented so the summed loadings are positive, but individual loadings may be negative because PC1 describes a trade-off direction.
+
+By default, PCA is fitted on rows identified by KymoKnot (`--complexity-filter identified`), excluding `none` and `??` rows. If fewer than three rows match, the script falls back to all rows and prints a warning. Other filters are `all`, `unidentified`, and `non-unknot`. When the pipeline runs multiple creep variants, all variants are pooled so the complexity score uses one common scale. To fit a separate model per variant, call `compute_complexity.py` once per catalog instead.
+
+Outputs:
+
+| File | Contents |
+| --- | --- |
+| `complexity/complexity_model.tsv` | Feature means, standard deviations, and PC1 weights |
+| `complexity/complexity_summary.txt` | Training rows, filter, explained variance, orientation |
+| `complexity/complexity_scores.tsv` | Per-seed PC1, normalized score, percentile, raw features |
+| `<variant>/catalog_with_complexity.tsv` | Catalog with `complexity_pc1`, `complexity_score`, `complexity_percentile` |
+| `<variant>/cut_eval_with_complexity.tsv` | Cut evaluation joined to the complexity score |
+| `<variant>/cuts_to_zero_with_complexity.tsv` | Cuts-to-zero evaluation joined to the complexity score |
+| `complexity/strategy_by_complexity.tsv` | Strategy means/medians by complexity quartile |
+| `complexity/strategy_correlations.tsv` | Pearson correlation between complexity and strategy metrics |
+
+The simulation and strategy evaluation remain complexity-agnostic; the PCA score is applied in post-processing. The legacy `entanglementScore` column is still written by the catalog, but `complexity_score` is the PCA-derived score.
+
+To recompute the complexity pass on an existing dataset:
+
+```bash
+python3 scripts/compute_complexity.py \
+  results/full_dataset_<timestamp>/{zero,current,high}/catalog.tsv \
+  --out-dir results/full_dataset_<timestamp>/complexity
+```
 
 ### Command-line reference
 
@@ -268,7 +311,7 @@ Catalog rows include, among others:
 - `knotType`, `seed`, `pieceIndex`, `knotCount`, `pieceCount`
 - hoop and threading counts: `totalHoopCount`, `threadedHoopCount`, `totalThreadingCount`
 - collision statistics: `selfCollisionCount`, `closePairCount`, `contactParticipationCount`, `minPairDistance`
-- topology/geometry: `knotSpanFraction`, `proximityScore`, `totalCurvatureDensity`, `outsideKnotCurvatureDensity`
+- topology/geometry: `knotSpanFraction`, `proximityScore`, `totalCurvature`, `outsideKnotCurvature`, `totalCurvatureDensity`, `outsideKnotCurvatureDensity`
 - `entanglementScore`, a catalog-normalized combination of threading, close pairs, contact participation, knot span, outside-knot curvature, extra knots, and proximity
 
 Reference artifacts in `Demos/MyCableDemo/`:
@@ -286,6 +329,8 @@ Reference artifacts in `Demos/MyCableDemo/`:
 The checked-in `knot_cut_eval_v3.tsv` and `knot_cuts_to_zero_v3.tsv` files predate the random-hoop and biggest-hoop strategies; new evaluation runs include the additional columns.
 
 ### PCA workflow
+
+`run_pca.py` is the older PCA visualization helper and defaults to density/threading features. The dataset pipeline's complexity score uses `scripts/compute_complexity.py` with the five non-threading metrics described above.
 
 After producing a density-normalized metrics table, run:
 
@@ -321,7 +366,8 @@ Scene construction, keyboard bindings, evaluation orchestration, and output path
 
 | Path | Contents |
 | --- | --- |
-| `Demos/MyCableDemo/` | Cable demo, physics helpers, analyzers, evaluation data, PCA script |
+| `Demos/MyCableDemo/` | Cable demo, physics helpers, analyzers, evaluation data, legacy PCA script |
+| `scripts/` | Dataset pipeline and PCA complexity analysis |
 | `Demos/Visualization/` | OpenGL/imgui visualization helpers |
 | `PositionBasedDynamics/` | PBD/XPBD constraint library |
 | `Simulation/` | Simulation framework |
@@ -338,6 +384,7 @@ Scene construction, keyboard bindings, evaluation orchestration, and output path
 - **CMake configure fails while cloning Discregrid/GenericParameters**: check Git/network access or provide the preinstalled paths shown above.
 - **Evaluation mode fails to open a window**: unattended modes still need an OpenGL context; use `xvfb-run -a`.
 - **Seed bank or catalog not found**: pass `--seed-bank` / `--catalog-file`, or run from the repository root so the default paths resolve.
+- **Complexity pass fails with NumPy missing**: install `python3-numpy` or pass `--no-complexity` to the pipeline.
 - **Knot type looks wrong for complex knots**: KymoKnot uses Alexander determinants at `t=-1` and `t=-2`; complex knots can share determinants with other knots. See `KymoKnot-clone/README.md` for details.
 
 ## License and upstream

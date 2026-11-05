@@ -15,6 +15,8 @@ EVAL_RANDOM_TRIALS=10
 EVAL_ORACLE=1
 CTZ_MAX_CUTS=10
 CTZ_RANDOM_TRIALS=20
+RUN_COMPLEXITY=1
+COMPLEXITY_FILTER=identified
 SINGLE_CREEP=""
 CREEP_CURRENT=0.02
 CREEP_HIGH=0.2
@@ -43,6 +45,9 @@ Options:
   --force                   Overwrite existing generated files
   --oracle                  Enable the exhaustive single-cut oracle (default)
   --no-oracle               Skip the exhaustive single-cut oracle
+  --no-complexity           Skip the PCA-derived complexity post-processing
+  --complexity-filter MODE  PCA training rows: all, identified, unidentified,
+                            or non-unknot (default: identified)
   --creep V                 Run only this creep value (single-variant mode)
   --creep-current V         "current" creep value (default: 0.02)
   --creep-high V            "high" creep value (default: 0.2)
@@ -65,6 +70,8 @@ Notes:
   * The script lowers the creep activation threshold to 0.0001. With the code
     default of 0.01, the mismatch under gravity-only settling stays below the
     threshold and all creep variants produce identical samples.
+  * The complexity pass requires Python 3 with NumPy. Use --no-complexity to
+    skip it.
 EOF
 }
 
@@ -106,6 +113,15 @@ while [ "$#" -gt 0 ]; do
     --no-oracle)
       EVAL_ORACLE=0
       shift
+      ;;
+    --no-complexity)
+      RUN_COMPLEXITY=0
+      shift
+      ;;
+    --complexity-filter)
+      [ "$#" -ge 2 ] || die "--complexity-filter requires a value"
+      COMPLEXITY_FILTER="$2"
+      shift 2
       ;;
     --creep)
       [ "$#" -ge 2 ] || die "--creep requires a value"
@@ -181,6 +197,10 @@ fi
 
 [ "$END_SEED" -ge "$START_SEED" ] || die "--end must be >= --start"
 [ "$WORKERS" -ge 1 ] || die "--workers must be at least 1"
+case "$COMPLEXITY_FILTER" in
+  all|identified|unidentified|non-unknot) ;;
+  *) die "invalid --complexity-filter '$COMPLEXITY_FILTER'" ;;
+esac
 [ "$EVAL_RANDOM_TRIALS" -ge 1 ] || die "--eval-random-trials must be at least 1"
 [ "$CTZ_MAX_CUTS" -ge 1 ] || die "--ctz-max-cuts must be at least 1"
 [ "$CTZ_RANDOM_TRIALS" -ge 1 ] || die "--ctz-random-trials must be at least 1"
@@ -447,6 +467,7 @@ run_variant() {
 
 START_ALL_TS=$(date +%s)
 printf 'variant\tcreep\tsettle_steps\tthreshold\tseeds\telapsed_seconds\tcatalog\tcut_eval\tcuts_to_zero\n' > "$MANIFEST"
+variant_catalogs=()
 
 for variant_spec in "${VARIANTS[@]}"; do
   label="${variant_spec%%:*}"
@@ -459,6 +480,7 @@ for variant_spec in "${VARIANTS[@]}"; do
   fi
 
   run_variant "$label" "$creep" "$variant_out"
+  variant_catalogs+=("$variant_out/catalog.tsv")
 
   elapsed="$(awk -F= '$1 == "elapsed_seconds" { print $2 }' "$variant_out/summary.txt")"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -469,6 +491,22 @@ done
 
 END_ALL_TS=$(date +%s)
 TOTAL_ELAPSED=$((END_ALL_TS - START_ALL_TS))
+
+if [ "$RUN_COMPLEXITY" -eq 1 ] && [ "$TOTAL" -lt 2 ]; then
+  echo "warning: skipping complexity pass; at least two seeds are required for PCA"
+elif [ "$RUN_COMPLEXITY" -eq 1 ]; then
+  command -v python3 >/dev/null 2>&1 || die "python3 not found; use --no-complexity to skip the PCA pass"
+  python3 -c 'import numpy' >/dev/null 2>&1 || \
+    die "NumPy not found; install python3-numpy or use --no-complexity"
+
+  echo "running PCA complexity pass"
+  python3 "$ROOT/scripts/compute_complexity.py" \
+    "${variant_catalogs[@]}" \
+    --out-dir "$OUT_DIR/complexity" \
+    --knot-filter "$COMPLEXITY_FILTER"
+
+  echo "complexity:    $OUT_DIR/complexity"
+fi
 
 echo "dataset root:  $OUT_DIR"
 echo "manifest:      $MANIFEST"

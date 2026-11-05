@@ -692,6 +692,7 @@ static void appendCatalogRows(
 
     bool needsHeader = true;
     bool writeLegacyClusterColumn = false;
+    bool writeCurvatureRawColumns = true;
     bool writeCurvatureDensityColumns = true;
     {
         std::ifstream in(g_knotSeedCatalogPath);
@@ -702,6 +703,8 @@ static void appendCatalogRows(
             std::getline(in, headerLine);
             writeLegacyClusterColumn =
                 headerLine.find("\tclusterPenalty\t") != std::string::npos;
+            writeCurvatureRawColumns =
+                headerLine.find("\ttotalCurvature\t") != std::string::npos;
             writeCurvatureDensityColumns =
                 headerLine.find("\ttotalCurvatureDensity\t") != std::string::npos;
         }
@@ -721,6 +724,7 @@ static void appendCatalogRows(
             << "\tselfCollisionCount\tclosePairCount\tsamePieceClosePairCount\tcrossPieceClosePairCount"
             << "\tcontactParticipationCount\tminPairDistance\tknotSpanFraction\tproximityScore"
             << "\tcrossPieceProximityScore\tsamePieceProximityScore"
+            << "\ttotalCurvature\toutsideKnotCurvature"
             << "\ttotalCurvatureDensity\toutsideKnotCurvatureDensity\tentanglementScore\n";
     }
 
@@ -838,9 +842,11 @@ static void appendCatalogRows(
             << metrics.samePieceProximityScore << '\t';
         if (writeLegacyClusterColumn)
             out << static_cast<Real>(0.0) << '\t';
-        out << (writeCurvatureDensityColumns ? totalCurvatureDensity : totalCurvature) << '\t'
-            << (writeCurvatureDensityColumns ? outsideKnotCurvatureDensity : outsideKnotCurvature) << '\t'
-            << catalogEntanglementScore << '\n';
+        if (writeCurvatureRawColumns)
+            out << totalCurvature << '\t' << outsideKnotCurvature << '\t';
+        if (writeCurvatureDensityColumns)
+            out << totalCurvatureDensity << '\t' << outsideKnotCurvatureDensity << '\t';
+        out << catalogEntanglementScore << '\n';
     }
 
     std::cout << "[knot-catalog] wrote " << records.size()
