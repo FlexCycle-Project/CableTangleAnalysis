@@ -40,6 +40,7 @@ struct RestShapeCreepConfig
 {
     bool enabled = true;
     unsigned int activationDelaySteps = 600;
+    unsigned int evaluationDelaySteps = 0;
     unsigned int stepInterval = 20;
     Real creep = static_cast<Real>(0.02);
     Real activationThreshold = static_cast<Real>(1e-2);

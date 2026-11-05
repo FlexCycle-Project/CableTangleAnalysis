@@ -15,22 +15,39 @@ EVAL_RANDOM_TRIALS=10
 EVAL_ORACLE=1
 CTZ_MAX_CUTS=10
 CTZ_RANDOM_TRIALS=20
+SINGLE_CREEP=""
+CREEP_CURRENT=0.02
+CREEP_HIGH=0.2
+CREEP_SETTLE_STEPS=300
+CREEP_THRESHOLD=0.0001
 
 usage() {
   cat <<'EOF'
 Usage: scripts/run_full_pipeline.sh [options]
 
-Runs catalog generation, cut-heuristic evaluation, and cuts-to-zero
-evaluation for a seed range, with the range split across parallel workers.
+Runs catalog generation, cut evaluation, and cuts-to-zero evaluation for a
+seed range. By default it runs three rest-state-creep variants:
+
+  zero      creep = 0
+  current   creep = 0.02 (the code default)
+  high      creep = 0.2
+
+Each variant is written to its own subdirectory. Use --creep to run only one
+creep value instead.
 
 Options:
   --start N                 First seed (default: 1)
   --end N                   Last seed, inclusive (default: 1000)
-  --workers N               Number of parallel workers (default: 8)
-  --out DIR                 Output directory (default: results/catalog_<timestamp>)
-  --force                   Overwrite output files in an existing --out directory
+  --workers N               Number of parallel seed workers (default: 8)
+  --out DIR                 Output root (default: results/full_dataset_<timestamp>)
+  --force                   Overwrite existing generated files
   --oracle                  Enable the exhaustive single-cut oracle (default)
   --no-oracle               Skip the exhaustive single-cut oracle
+  --creep V                 Run only this creep value (single-variant mode)
+  --creep-current V         "current" creep value (default: 0.02)
+  --creep-high V            "high" creep value (default: 0.2)
+  --creep-settle-steps N    Steps after creep activation before evaluation (default: 300)
+  --creep-threshold V       Creep activation threshold (default: 0.0001)
   --eval-random-trials N    Cut-eval random edge/hoop trials per seed (default: 10)
   --ctz-max-cuts N          Max cuts per seed in cuts-to-zero (default: 10)
   --ctz-random-trials N     Cuts-to-zero random edge/hoop trials per seed (default: 20)
@@ -43,6 +60,11 @@ Notes:
     letting every process spawn one OpenMP thread per CPU core.
   * Xvfb is used because MyCableDemo still creates an OpenGL window when run
     in batch mode.
+  * Running all three creep variants takes roughly three times as long as a
+    single variant.
+  * The script lowers the creep activation threshold to 0.0001. With the code
+    default of 0.01, the mismatch under gravity-only settling stays below the
+    threshold and all creep variants produce identical samples.
 EOF
 }
 
@@ -85,6 +107,31 @@ while [ "$#" -gt 0 ]; do
       EVAL_ORACLE=0
       shift
       ;;
+    --creep)
+      [ "$#" -ge 2 ] || die "--creep requires a value"
+      SINGLE_CREEP="$2"
+      shift 2
+      ;;
+    --creep-current)
+      [ "$#" -ge 2 ] || die "--creep-current requires a value"
+      CREEP_CURRENT="$2"
+      shift 2
+      ;;
+    --creep-high)
+      [ "$#" -ge 2 ] || die "--creep-high requires a value"
+      CREEP_HIGH="$2"
+      shift 2
+      ;;
+    --creep-settle-steps)
+      [ "$#" -ge 2 ] || die "--creep-settle-steps requires a value"
+      CREEP_SETTLE_STEPS="$2"
+      shift 2
+      ;;
+    --creep-threshold)
+      [ "$#" -ge 2 ] || die "--creep-threshold requires a value"
+      CREEP_THRESHOLD="$2"
+      shift 2
+      ;;
     --eval-random-trials)
       [ "$#" -ge 2 ] || die "--eval-random-trials requires a value"
       EVAL_RANDOM_TRIALS="$2"
@@ -110,10 +157,22 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for value_name in START_SEED END_SEED WORKERS EVAL_RANDOM_TRIALS CTZ_MAX_CUTS CTZ_RANDOM_TRIALS; do
+for value_name in START_SEED END_SEED WORKERS CREEP_SETTLE_STEPS EVAL_RANDOM_TRIALS CTZ_MAX_CUTS CTZ_RANDOM_TRIALS; do
   value="${!value_name}"
   [[ "$value" =~ ^[0-9]+$ ]] || die "$value_name must be a non-negative integer (got '$value')"
 done
+
+is_creep_number() {
+  [[ "$1" =~ ^[0-9]*\.?[0-9]+$ ]]
+}
+
+if [ -n "$SINGLE_CREEP" ]; then
+  is_creep_number "$SINGLE_CREEP" || die "--creep must be a non-negative number (got '$SINGLE_CREEP')"
+else
+  is_creep_number "$CREEP_CURRENT" || die "--creep-current must be a non-negative number (got '$CREEP_CURRENT')"
+  is_creep_number "$CREEP_HIGH" || die "--creep-high must be a non-negative number (got '$CREEP_HIGH')"
+fi
+is_creep_number "$CREEP_THRESHOLD" || die "--creep-threshold must be a non-negative number (got '$CREEP_THRESHOLD')"
 
 if [ "$START_SEED" -eq 0 ]; then
   echo "note: seed 0 is normalized to 1 by MyCableDemo; starting at 1."
@@ -135,23 +194,30 @@ fi
 [ -x "$KYMOKNOT_BIN" ] || die "KymoKnot is not executable: $KYMOKNOT_BIN (run: make -C KymoKnot-clone)"
 command -v Xvfb >/dev/null 2>&1 || die "Xvfb not found; install it (e.g. apt install xvfb)"
 
+if [ -n "$SINGLE_CREEP" ]; then
+  MODE="single"
+  VARIANTS=("single:$SINGLE_CREEP")
+  DEFAULT_OUT="$ROOT/results/catalog_$(date +%Y%m%d_%H%M%S)"
+else
+  MODE="multi"
+  VARIANTS=("zero:0" "current:$CREEP_CURRENT" "high:$CREEP_HIGH")
+  DEFAULT_OUT="$ROOT/results/full_dataset_$(date +%Y%m%d_%H%M%S)"
+fi
+
 if [ -z "$OUT_DIR" ]; then
-  OUT_DIR="$ROOT/results/catalog_$(date +%Y%m%d_%H%M%S)"
+  OUT_DIR="$DEFAULT_OUT"
 fi
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+mkdir -p "$OUT_DIR/logs"
 
+MANIFEST="$OUT_DIR/manifest.tsv"
 if [ "$FORCE" -eq 1 ]; then
-  rm -rf "$OUT_DIR/parts" "$OUT_DIR/logs" "$OUT_DIR/work"
-  rm -f "$OUT_DIR/catalog.tsv" "$OUT_DIR/cut_eval.tsv" "$OUT_DIR/cuts_to_zero.tsv"
+  rm -f "$MANIFEST"
 else
-  for output_name in catalog.tsv cut_eval.tsv cuts_to_zero.tsv; do
-    [ ! -e "$OUT_DIR/$output_name" ] || \
-      die "$OUT_DIR/$output_name already exists; use --force or a different --out"
-  done
+  [ ! -e "$MANIFEST" ] || \
+    die "$MANIFEST already exists; use --force or a different --out"
 fi
-
-mkdir -p "$OUT_DIR/parts" "$OUT_DIR/logs" "$OUT_DIR/work"
 
 export KYMOKNOT_ROOT
 export OMP_NUM_THREADS=1
@@ -162,7 +228,8 @@ while [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] || pgrep -f "Xvfb :$DISPLAY_NUM " >/
   [ "$DISPLAY_NUM" -lt 250 ] || die "could not find a free X display number"
 done
 
-Xvfb ":$DISPLAY_NUM" -screen 0 1280x1024x24 > "$OUT_DIR/logs/xvfb.log" 2>&1 &
+XVFB_LOG="$OUT_DIR/xvfb.log"
+Xvfb ":$DISPLAY_NUM" -screen 0 1280x1024x24 > "$XVFB_LOG" 2>&1 &
 XVFB_PID=$!
 
 cleanup() {
@@ -175,7 +242,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] || {
-  cat "$OUT_DIR/logs/xvfb.log" >&2 || true
+  cat "$XVFB_LOG" >&2 || true
   die "Xvfb failed to start on display :$DISPLAY_NUM"
 }
 export DISPLAY=":$DISPLAY_NUM"
@@ -186,14 +253,16 @@ run_worker() {
   local worker="$1"
   local first_seed="$2"
   local last_seed="$3"
+  local variant_out="$4"
+  local creep="$5"
   local count=$((last_seed - first_seed + 1))
 
-  local work_dir="$OUT_DIR/work/worker_${worker}"
-  local log="$OUT_DIR/logs/worker_${worker}.log"
-  local catalog_part="$OUT_DIR/parts/catalog_${worker}.tsv"
-  local cut_part="$OUT_DIR/parts/cut_${worker}.tsv"
-  local ctz_part="$OUT_DIR/parts/ctz_${worker}.tsv"
-  local seed_bank="$OUT_DIR/parts/seed_bank_${worker}.txt"
+  local work_dir="$variant_out/work/worker_${worker}"
+  local log="$variant_out/logs/worker_${worker}.log"
+  local catalog_part="$variant_out/parts/catalog_${worker}.tsv"
+  local cut_part="$variant_out/parts/cut_${worker}.tsv"
+  local ctz_part="$variant_out/parts/ctz_${worker}.tsv"
+  local seed_bank="$variant_out/parts/seed_bank_${worker}.txt"
   local oracle_args=()
   if [ "$EVAL_ORACLE" -eq 1 ]; then
     oracle_args+=(--eval-oracle)
@@ -203,17 +272,23 @@ run_worker() {
   cd "$work_dir"
 
   {
-    echo "[worker $worker] seeds ${first_seed}-${last_seed} (${count})"
+    echo "[worker $worker] creep=$creep seeds ${first_seed}-${last_seed} (${count})"
     echo "[worker $worker] catalog generation"
     "$BIN" \
+      --creep="$creep" \
+      --creep-settle-steps="$CREEP_SETTLE_STEPS" \
+      --creep-threshold="$CREEP_THRESHOLD" \
       --catalog-run \
       --catalog-start="$first_seed" \
       --catalog-max="$count" \
       --catalog-file="$catalog_part" \
       --seed-bank="$seed_bank"
 
-    echo "[worker $worker] cut-heuristic evaluation"
+    echo "[worker $worker] cut evaluation"
     "$BIN" \
+      --creep="$creep" \
+      --creep-settle-steps="$CREEP_SETTLE_STEPS" \
+      --creep-threshold="$CREEP_THRESHOLD" \
       --catalog-file="$catalog_part" \
       --eval-run \
       --eval-output="$cut_part" \
@@ -222,6 +297,9 @@ run_worker() {
 
     echo "[worker $worker] cuts-to-zero evaluation"
     "$BIN" \
+      --creep="$creep" \
+      --creep-settle-steps="$CREEP_SETTLE_STEPS" \
+      --creep-threshold="$CREEP_THRESHOLD" \
       --catalog-file="$catalog_part" \
       --eval-cuts-to-zero \
       --eval-ctz-output="$ctz_part" \
@@ -252,85 +330,146 @@ merge_parts() {
   done
 }
 
-START_TS=$(date +%s)
-echo "run: seeds ${START_SEED}-${END_SEED} (${TOTAL}), workers=${WORKERS}"
-echo "output: $OUT_DIR"
+run_variant() {
+  local label="$1"
+  local creep="$2"
+  local variant_out="$3"
 
-base=$((TOTAL / WORKERS))
-remainder=$((TOTAL % WORKERS))
-next_seed="$START_SEED"
-pids=()
+  mkdir -p "$variant_out"
+  variant_out="$(cd "$variant_out" && pwd)"
 
-for worker in $(seq 1 "$WORKERS"); do
-  count="$base"
-  if [ "$worker" -le "$remainder" ]; then
-    count=$((count + 1))
+  local start_ts
+  start_ts=$(date +%s)
+
+  echo "variant: label=$label creep=$creep output=$variant_out"
+
+  if [ "$FORCE" -eq 1 ]; then
+    rm -rf "$variant_out/parts" "$variant_out/logs" "$variant_out/work"
+    rm -f "$variant_out/catalog.tsv" "$variant_out/cut_eval.tsv" \
+      "$variant_out/cuts_to_zero.tsv" "$variant_out/summary.txt"
+  else
+    for output_name in catalog.tsv cut_eval.tsv cuts_to_zero.tsv; do
+      [ ! -e "$variant_out/$output_name" ] || \
+        die "$variant_out/$output_name already exists; use --force or a different --out"
+    done
   fi
-  first_seed="$next_seed"
-  last_seed=$((next_seed + count - 1))
-  next_seed=$((last_seed + 1))
 
-  run_worker "$worker" "$first_seed" "$last_seed" &
-  pids+=("$!")
-done
+  mkdir -p "$variant_out/parts" "$variant_out/logs" "$variant_out/work"
 
-failed=0
-for pid in "${pids[@]}"; do
-  if ! wait "$pid"; then
-    failed=1
+  local base=$((TOTAL / WORKERS))
+  local remainder=$((TOTAL % WORKERS))
+  local next_seed="$START_SEED"
+  local pids=()
+
+  for worker in $(seq 1 "$WORKERS"); do
+    local count="$base"
+    if [ "$worker" -le "$remainder" ]; then
+      count=$((count + 1))
+    fi
+    local first_seed="$next_seed"
+    local last_seed=$((next_seed + count - 1))
+    next_seed=$((last_seed + 1))
+
+    run_worker "$worker" "$first_seed" "$last_seed" "$variant_out" "$creep" &
+    pids+=("$!")
+  done
+
+  local failed=0
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      failed=1
+    fi
+  done
+
+  if [ "$failed" -ne 0 ]; then
+    echo "error: at least one worker failed; see $variant_out/logs" >&2
+    return 1
   fi
+
+  local catalog_parts=()
+  local cut_parts=()
+  local ctz_parts=()
+  for worker in $(seq 1 "$WORKERS"); do
+    catalog_parts+=("$variant_out/parts/catalog_${worker}.tsv")
+    cut_parts+=("$variant_out/parts/cut_${worker}.tsv")
+    ctz_parts+=("$variant_out/parts/ctz_${worker}.tsv")
+  done
+
+  merge_parts "$variant_out/catalog.tsv" "${catalog_parts[@]}"
+  merge_parts "$variant_out/cut_eval.tsv" "${cut_parts[@]}"
+  merge_parts "$variant_out/cuts_to_zero.tsv" "${ctz_parts[@]}"
+
+  local unique_seeds
+  unique_seeds="$(awk -F'\t' 'NR > 1 && $2 ~ /^[0-9]+$/ { print $2 }' "$variant_out/catalog.tsv" | sort -n | uniq | wc -l)"
+  local catalog_rows
+  catalog_rows=$(($(wc -l < "$variant_out/catalog.tsv") - 1))
+  local cut_rows
+  cut_rows=$(($(wc -l < "$variant_out/cut_eval.tsv") - 1))
+  local ctz_rows
+  ctz_rows=$(($(wc -l < "$variant_out/cuts_to_zero.tsv") - 1))
+
+  [ "$unique_seeds" -eq "$TOTAL" ] || \
+    die "catalog has $unique_seeds unique seeds, expected $TOTAL"
+  [ "$cut_rows" -eq "$TOTAL" ] || \
+    die "cut evaluation has $cut_rows rows, expected $TOTAL"
+  [ "$ctz_rows" -eq "$TOTAL" ] || \
+    die "cuts-to-zero evaluation has $ctz_rows rows, expected $TOTAL"
+
+  local end_ts
+  end_ts=$(date +%s)
+  local elapsed=$((end_ts - start_ts))
+
+  {
+    echo "variant=$label"
+    echo "creep=$creep"
+    echo "start_seed=$START_SEED"
+    echo "end_seed=$END_SEED"
+    echo "seeds=$TOTAL"
+    echo "workers=$WORKERS"
+    echo "elapsed_seconds=$elapsed"
+    echo "catalog_rows=$catalog_rows"
+    echo "unique_seeds=$unique_seeds"
+    echo "cut_rows=$cut_rows"
+    echo "ctz_rows=$ctz_rows"
+    echo "creep_settle_steps=$CREEP_SETTLE_STEPS"
+    echo "creep_threshold=$CREEP_THRESHOLD"
+    echo "eval_random_trials=$EVAL_RANDOM_TRIALS"
+    echo "eval_oracle=$EVAL_ORACLE"
+    echo "ctz_max_cuts=$CTZ_MAX_CUTS"
+    echo "ctz_random_trials=$CTZ_RANDOM_TRIALS"
+  } | tee "$variant_out/summary.txt"
+
+  echo "catalog:       $variant_out/catalog.tsv"
+  echo "cut eval:      $variant_out/cut_eval.tsv"
+  echo "cuts to zero:  $variant_out/cuts_to_zero.tsv"
+  echo "logs:          $variant_out/logs"
+}
+
+START_ALL_TS=$(date +%s)
+printf 'variant\tcreep\tsettle_steps\tthreshold\tseeds\telapsed_seconds\tcatalog\tcut_eval\tcuts_to_zero\n' > "$MANIFEST"
+
+for variant_spec in "${VARIANTS[@]}"; do
+  label="${variant_spec%%:*}"
+  creep="${variant_spec#*:}"
+
+  if [ "$MODE" = "single" ]; then
+    variant_out="$OUT_DIR"
+  else
+    variant_out="$OUT_DIR/$label"
+  fi
+
+  run_variant "$label" "$creep" "$variant_out"
+
+  elapsed="$(awk -F= '$1 == "elapsed_seconds" { print $2 }' "$variant_out/summary.txt")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$label" "$creep" "$CREEP_SETTLE_STEPS" "$CREEP_THRESHOLD" "$TOTAL" "$elapsed" \
+    "$variant_out/catalog.tsv" "$variant_out/cut_eval.tsv" \
+    "$variant_out/cuts_to_zero.tsv" >> "$MANIFEST"
 done
 
-if [ "$failed" -ne 0 ]; then
-  echo "error: at least one worker failed; see $OUT_DIR/logs" >&2
-  exit 1
-fi
+END_ALL_TS=$(date +%s)
+TOTAL_ELAPSED=$((END_ALL_TS - START_ALL_TS))
 
-catalog_parts=()
-cut_parts=()
-ctz_parts=()
-for worker in $(seq 1 "$WORKERS"); do
-  catalog_parts+=("$OUT_DIR/parts/catalog_${worker}.tsv")
-  cut_parts+=("$OUT_DIR/parts/cut_${worker}.tsv")
-  ctz_parts+=("$OUT_DIR/parts/ctz_${worker}.tsv")
-done
-
-merge_parts "$OUT_DIR/catalog.tsv" "${catalog_parts[@]}"
-merge_parts "$OUT_DIR/cut_eval.tsv" "${cut_parts[@]}"
-merge_parts "$OUT_DIR/cuts_to_zero.tsv" "${ctz_parts[@]}"
-
-unique_seeds="$(awk -F'\t' 'NR > 1 && $2 ~ /^[0-9]+$/ { print $2 }' "$OUT_DIR/catalog.tsv" | sort -n | uniq | wc -l)"
-catalog_rows=$(($(wc -l < "$OUT_DIR/catalog.tsv") - 1))
-cut_rows=$(($(wc -l < "$OUT_DIR/cut_eval.tsv") - 1))
-ctz_rows=$(($(wc -l < "$OUT_DIR/cuts_to_zero.tsv") - 1))
-
-[ "$unique_seeds" -eq "$TOTAL" ] || \
-  die "catalog has $unique_seeds unique seeds, expected $TOTAL"
-[ "$cut_rows" -eq "$TOTAL" ] || \
-  die "cut evaluation has $cut_rows rows, expected $TOTAL"
-[ "$ctz_rows" -eq "$TOTAL" ] || \
-  die "cuts-to-zero evaluation has $ctz_rows rows, expected $TOTAL"
-
-END_TS=$(date +%s)
-ELAPSED=$((END_TS - START_TS))
-
-{
-  echo "start_seed=$START_SEED"
-  echo "end_seed=$END_SEED"
-  echo "seeds=$TOTAL"
-  echo "workers=$WORKERS"
-  echo "elapsed_seconds=$ELAPSED"
-  echo "catalog_rows=$catalog_rows"
-  echo "unique_seeds=$unique_seeds"
-  echo "cut_rows=$cut_rows"
-  echo "ctz_rows=$ctz_rows"
-  echo "eval_random_trials=$EVAL_RANDOM_TRIALS"
-  echo "eval_oracle=$EVAL_ORACLE"
-  echo "ctz_max_cuts=$CTZ_MAX_CUTS"
-  echo "ctz_random_trials=$CTZ_RANDOM_TRIALS"
-} | tee "$OUT_DIR/summary.txt"
-
-echo "catalog:       $OUT_DIR/catalog.tsv"
-echo "cut eval:      $OUT_DIR/cut_eval.tsv"
-echo "cuts to zero:  $OUT_DIR/cuts_to_zero.tsv"
-echo "logs:          $OUT_DIR/logs"
+echo "dataset root:  $OUT_DIR"
+echo "manifest:      $MANIFEST"
+echo "total elapsed: ${TOTAL_ELAPSED}s"

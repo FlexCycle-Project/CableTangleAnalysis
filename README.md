@@ -160,9 +160,19 @@ Example cuts-to-zero evaluation:
 scripts/run_full_pipeline.sh --start 1 --end 1000 --workers 8
 ```
 
-Results are written to `results/catalog_<timestamp>/` as `catalog.tsv`, `cut_eval.tsv`, and `cuts_to_zero.tsv`, with per-worker logs under `logs/`. The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window.
+By default it generates three rest-state-creep variants:
 
-Use `--help` for all options. The pipeline runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it if you want to trade away the upper-bound comparison for speed. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds.
+| Directory | Creep value |
+| --- | ---: |
+| `zero/` | 0 |
+| `current/` | 0.02 |
+| `high/` | 0.2 |
+
+Each variant contains `catalog.tsv`, `cut_eval.tsv`, `cuts_to_zero.tsv`, a `summary.txt`, and per-worker logs. A top-level `manifest.tsv` lists all variants. Use `--creep <value>` to run a single creep value instead (written directly to `--out`), or override the high/current values with `--creep-high` / `--creep-current`.
+
+The script also sets `--creep-settle-steps=300` and lowers the creep activation threshold to `0.0001`. With the code default threshold (`0.01`), sustained mismatch under gravity-only settling stays below the threshold, so the creep variants would otherwise be identical. Override these with `--creep-settle-steps` and `--creep-threshold`.
+
+The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window. It runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds. Running all three creep variants takes roughly three times as long as a single variant.
 
 ### Cut strategies
 
@@ -202,6 +212,9 @@ Cuts-to-zero appends:
 | `--catalog-steps-per-frame=<n>` | Simulation steps per frame in catalog mode; also enables catalog mode |
 | `--catalog-max=<n>` | Stop after N catalog samples; also enables catalog mode |
 | `--catalog-start=<n>` | Start the catalog seed sequence at N; also enables catalog mode |
+| `--creep=<value>` | Rest-state creep rate; `0` disables adaptation but keeps batch triggering enabled |
+| `--creep-settle-steps=<n>` | Steps to run after creep activation before batch evaluation (default 0) |
+| `--creep-threshold=<value>` | Creep mismatch activation threshold (default 0.01) |
 | `--eval-run` | Run cut evaluation (all non-oracle strategies) |
 | `--eval-oracle` | Also run the exhaustive single-cut oracle; implies `--eval-run` |
 | `--eval-cuts-to-zero` | Run cuts-to-zero evaluation |
@@ -300,7 +313,7 @@ Most simulation defaults live in [`Demos/MyCableDemo/CablePhysics.h`](Demos/MyCa
 - `PhysicsConfig`: time step, end-pull spring/damping, velocity blending
 - `RandomCableConfig`: control-point count, lateral bounds, smoothing, seed
 - `SelfCollisionConfig`: radius, compliance, iterations, damping, hash cell size
-- `RestShapeCreepConfig`: rest-shape creep activation and rate
+- `RestShapeCreepConfig`: creep rate, activation delay, evaluation delay, update interval, and activation threshold
 
 Scene construction, keyboard bindings, evaluation orchestration, and output paths are in [`Demos/MyCableDemo/main.cpp`](Demos/MyCableDemo/main.cpp).
 

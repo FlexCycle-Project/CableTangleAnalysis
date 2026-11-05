@@ -1921,6 +1921,44 @@ int main(int argc, char** argv)
         {
             g_knotSeedCatalogPath = arg.substr(15);
         }
+        else if (arg.rfind("--creep=", 0) == 0)
+        {
+            try
+            {
+                const Real creep = static_cast<Real>(std::stod(arg.substr(8)));
+                g_cfg.restCreep.creep = std::max(
+                    static_cast<Real>(0.0),
+                    std::min(static_cast<Real>(1.0), creep));
+                g_cfg.restCreep.enabled = true;
+            }
+            catch (...)
+            {
+                std::cout << "[rest-creep] invalid --creep value: " << arg << std::endl;
+            }
+        }
+        else if (arg.rfind("--creep-settle-steps=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.restCreep.evaluationDelaySteps =
+                    static_cast<unsigned int>(std::stoul(arg.substr(21)));
+            }
+            catch (...)
+            {
+                g_cfg.restCreep.evaluationDelaySteps = 0;
+            }
+        }
+        else if (arg.rfind("--creep-threshold=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.restCreep.activationThreshold =
+                    static_cast<Real>(std::stod(arg.substr(18)));
+            }
+            catch (...)
+            {
+            }
+        }
         else if (arg == "--eval-run")
         {
             g_evalRunEnabled = true;
@@ -2065,6 +2103,13 @@ int main(int argc, char** argv)
             knotSelector = argv[++i];
         }
     }
+
+    std::cout << "[rest-creep] creep=" << g_cfg.restCreep.creep
+              << " activationDelaySteps=" << g_cfg.restCreep.activationDelaySteps
+              << " evaluationDelaySteps=" << g_cfg.restCreep.evaluationDelaySteps
+              << " stepInterval=" << g_cfg.restCreep.stepInterval
+              << " activationThreshold=" << g_cfg.restCreep.activationThreshold
+              << std::endl;
 
     loadKnotSeedPresetFile();
 
@@ -2679,7 +2724,8 @@ static void timeStep()
         base->step();
         if (!g_autoKnotEvaluationDone &&
             g_cfg.restCreep.enabled &&
-            g_restCreepCounter >= g_cfg.restCreep.activationDelaySteps)
+            g_restCreepCounter >=
+                g_cfg.restCreep.activationDelaySteps + g_cfg.restCreep.evaluationDelaySteps)
         {
             g_autoKnotEvaluationDone = true;
             if (g_catalogRunEnabled)
