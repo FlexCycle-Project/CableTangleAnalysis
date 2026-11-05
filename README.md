@@ -162,26 +162,31 @@ scripts/run_full_pipeline.sh --start 1 --end 1000 --workers 8
 
 Results are written to `results/catalog_<timestamp>/` as `catalog.tsv`, `cut_eval.tsv`, and `cuts_to_zero.tsv`, with per-worker logs under `logs/`. The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window.
 
-Use `--help` for all options. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds.
+Use `--help` for all options. The pipeline runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it if you want to trade away the upper-bound comparison for speed. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds.
 
 ### Cut strategies
 
-The evaluation modes compare four cut strategies:
+The evaluation modes compare these cut strategies:
 
-| Strategy | Selection |
-| --- | --- |
-| Heuristic | Hoop with the highest `pairSumScore` |
-| Random edge | Uniformly random valid cable edge (existing baseline) |
-| Random hoop | Uniformly random hoop with a positive score |
-| Biggest hoop | Hoop with the largest edge span (`endEdge - startEdge`), tie-broken by score |
+| Strategy | Selection | Modes |
+| --- | --- | --- |
+| Heuristic | Hoop with the highest `pairSumScore` | both |
+| Random edge | Uniformly random valid cable edge | both |
+| Random hoop | Uniformly random hoop with a positive score | both |
+| Biggest hoop | Hoop with the largest edge span (`endEdge - startEdge`) | both |
+| Smallest hoop | Hoop with the smallest edge span | both |
+| Max curvature | Valid edge with the largest discrete bend angle | both |
+| Oracle | Every valid edge; best single-cut reduction | cut evaluation, opt-in |
 
-Hoop-based strategies cut at the hoop midpoint. Random strategies use a per-seed RNG, so their results are reproducible. `--eval-random-trials` controls both random-edge and random-hoop trials in cut evaluation; `--eval-ctz-random-trials` controls both for cuts-to-zero.
+Hoop-based strategies cut at the hoop midpoint. Max-curvature cuts use the largest turning angle at the edge endpoints and respect `excludeArcLength`. Random strategies use a per-seed RNG, so their results are reproducible. `--eval-random-trials` controls both random-edge and random-hoop trials in cut evaluation; `--eval-ctz-random-trials` controls both for cuts-to-zero.
+
+`MyCableDemo` computes the exhaustive oracle only when `--eval-oracle` is passed. The pipeline script enables it by default; disable it with `--no-oracle`.
 
 Cut evaluation appends these columns:
-`delta_random_hoop_mean`, `delta_random_hoop_std`, `delta_biggest_hoop`, `biggest_hoop_span`, `biggest_hoop_score`, `hoop_count`.
+`delta_random_hoop_mean`, `delta_random_hoop_std`, `delta_biggest_hoop`, `biggest_hoop_span`, `biggest_hoop_score`, `hoop_count`, `delta_smallest_hoop`, `smallest_hoop_span`, `smallest_hoop_score`, `delta_max_curvature`, `max_curvature`, `delta_oracle`, `oracle_evaluated`, `oracle_piece_index`, `oracle_edge_index`.
 
 Cuts-to-zero appends:
-`random_hoop_cuts_mean`, `random_hoop_cuts_std`, `random_hoop_resolved_rate`, `biggest_hoop_cuts`, `biggest_hoop_resolved`, `hoop_count`.
+`random_hoop_cuts_mean`, `random_hoop_cuts_std`, `random_hoop_resolved_rate`, `biggest_hoop_cuts`, `biggest_hoop_resolved`, `hoop_count`, `smallest_hoop_cuts`, `smallest_hoop_resolved`, `max_curvature_cuts`, `max_curvature_resolved`.
 
 ### Command-line reference
 
@@ -197,7 +202,8 @@ Cuts-to-zero appends:
 | `--catalog-steps-per-frame=<n>` | Simulation steps per frame in catalog mode; also enables catalog mode |
 | `--catalog-max=<n>` | Stop after N catalog samples; also enables catalog mode |
 | `--catalog-start=<n>` | Start the catalog seed sequence at N; also enables catalog mode |
-| `--eval-run` | Run cut-heuristic evaluation |
+| `--eval-run` | Run cut evaluation (all non-oracle strategies) |
+| `--eval-oracle` | Also run the exhaustive single-cut oracle; implies `--eval-run` |
 | `--eval-cuts-to-zero` | Run cuts-to-zero evaluation |
 | `--eval-output=<path>` | Output file for cut-heuristic evaluation |
 | `--eval-ctz-output=<path>` | Output file for cuts-to-zero evaluation |

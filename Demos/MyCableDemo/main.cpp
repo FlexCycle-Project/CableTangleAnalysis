@@ -132,6 +132,7 @@ static std::mt19937 g_catalogRng;
 static bool g_evalRunEnabled = false;
 static std::string g_evalOutputPath;
 static unsigned int g_evalRandomTrials = 10;
+static bool g_evalOracleEnabled = false;
 static bool g_evalCutsToZeroEnabled = false;
 static std::string g_evalCutsToZeroOutputPath;
 static unsigned int g_evalCutsToZeroMaxCuts = 10;
@@ -347,7 +348,10 @@ static bool prepareCutEvalOutputFile()
     out << "seed\tknotType\tT_before\tdelta_heuristic\tdelta_random_mean"
         << "\tdelta_random_std\theuristic_hoop_score\tskipped"
         << "\tdelta_random_hoop_mean\tdelta_random_hoop_std\tdelta_biggest_hoop"
-        << "\tbiggest_hoop_span\tbiggest_hoop_score\thoop_count\n";
+        << "\tbiggest_hoop_span\tbiggest_hoop_score\thoop_count"
+        << "\tdelta_smallest_hoop\tsmallest_hoop_span\tsmallest_hoop_score"
+        << "\tdelta_max_curvature\tmax_curvature"
+        << "\tdelta_oracle\toracle_evaluated\toracle_piece_index\toracle_edge_index\n";
     return true;
 }
 
@@ -367,7 +371,9 @@ static bool prepareCutsToZeroEvalOutputFile()
     out << "seed\tknotType\tT_before\theuristic_cuts\theuristic_resolved"
         << "\trandom_cuts_mean\trandom_cuts_std\trandom_resolved_rate"
         << "\trandom_hoop_cuts_mean\trandom_hoop_cuts_std\trandom_hoop_resolved_rate"
-        << "\tbiggest_hoop_cuts\tbiggest_hoop_resolved\thoop_count\n";
+        << "\tbiggest_hoop_cuts\tbiggest_hoop_resolved\thoop_count"
+        << "\tsmallest_hoop_cuts\tsmallest_hoop_resolved"
+        << "\tmax_curvature_cuts\tmax_curvature_resolved\n";
     return true;
 }
 
@@ -954,6 +960,7 @@ namespace
         size_t edgeIndex = std::numeric_limits<size_t>::max();
         int hoopScore = 0;
         int hoopSpan = 0;
+        Real curvature = static_cast<Real>(0.0);
         bool valid = false;
     };
 
@@ -1032,6 +1039,23 @@ namespace
         return best;
     }
 
+    static VirtualCutTarget findSmallestHoopMidpointCut(
+        const TanglementAnalyzer::TanglementAnalysisResult& tanglement,
+        const std::vector<std::vector<Vector3r>>& ropePieces)
+    {
+        VirtualCutTarget best;
+        for (const VirtualCutTarget& candidate : collectHoopCutTargets(tanglement, ropePieces))
+        {
+            if (!best.valid ||
+                candidate.hoopSpan < best.hoopSpan ||
+                (candidate.hoopSpan == best.hoopSpan && candidate.hoopScore < best.hoopScore))
+            {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
     static bool selectRandomHoopCutTarget(
         const TanglementAnalyzer::TanglementAnalysisResult& tanglement,
         const std::vector<std::vector<Vector3r>>& ropePieces,
@@ -1084,6 +1108,51 @@ namespace
         return targets;
     }
 
+    static Real computeVertexCurvature(
+        const std::vector<Vector3r>& piece,
+        size_t vertexIndex)
+    {
+        if (vertexIndex == 0 || vertexIndex + 1 >= piece.size())
+            return static_cast<Real>(0.0);
+
+        const Vector3r a = piece[vertexIndex] - piece[vertexIndex - 1];
+        const Vector3r b = piece[vertexIndex + 1] - piece[vertexIndex];
+        const Real aNorm = a.norm();
+        const Real bNorm = b.norm();
+        if (aNorm <= static_cast<Real>(1e-8) || bNorm <= static_cast<Real>(1e-8))
+            return static_cast<Real>(0.0);
+
+        const Real c = std::max(
+            static_cast<Real>(-1.0),
+            std::min(static_cast<Real>(1.0), a.dot(b) / (aNorm * bNorm)));
+        return std::acos(c);
+    }
+
+    static Real computeEdgeCurvature(
+        const std::vector<Vector3r>& piece,
+        size_t edgeIndex)
+    {
+        return std::max(
+            computeVertexCurvature(piece, edgeIndex),
+            computeVertexCurvature(piece, edgeIndex + 1));
+    }
+
+    static VirtualCutTarget findMaxCurvatureCutTarget(
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        Real excludeArcLength)
+    {
+        VirtualCutTarget best;
+        for (VirtualCutTarget target : collectValidRandomCutTargets(ropePieces, excludeArcLength))
+        {
+            target.curvature = computeEdgeCurvature(
+                ropePieces[target.pieceIndex],
+                target.edgeIndex);
+            if (!best.valid || target.curvature > best.curvature)
+                best = target;
+        }
+        return best;
+    }
+
     static int computeThreadingCountGeometryOnly(
         const std::vector<std::vector<Vector3r>>& ropePieces)
     {
@@ -1110,6 +1179,41 @@ namespace
 
         const int afterThreading = computeThreadingCountGeometryOnly(splitPieces);
         return beforeThreading - afterThreading;
+    }
+
+    struct SingleCutOracleResult
+    {
+        VirtualCutTarget target;
+        int delta = 0;
+        bool evaluated = false;
+    };
+
+    static SingleCutOracleResult findBestSingleCutOracle(
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        int beforeThreading,
+        Real excludeArcLength)
+    {
+        SingleCutOracleResult result;
+        if (beforeThreading <= 0)
+            return result;
+
+        const std::vector<VirtualCutTarget> targets =
+            collectValidRandomCutTargets(ropePieces, excludeArcLength);
+        result.evaluated = !targets.empty();
+
+        for (const VirtualCutTarget& target : targets)
+        {
+            const int delta = computeVirtualCutDeltaThreading(
+                ropePieces,
+                beforeThreading,
+                target);
+            if (!result.target.valid || delta > result.delta)
+            {
+                result.target = target;
+                result.delta = delta;
+            }
+        }
+        return result;
     }
 
     struct CutsToZeroOutcome
@@ -1178,6 +1282,73 @@ namespace
             }
 
             const VirtualCutTarget target = findBiggestHoopMidpointCut(tanglement, pieces);
+            if (!target.valid || !splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
+                break;
+
+            ++outcome.cuts;
+        }
+
+        outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
+        if (!outcome.resolved)
+            outcome.cuts = maxCuts;
+        return outcome;
+    }
+
+    static CutsToZeroOutcome runSmallestHoopCutsToZero(
+        const std::vector<std::vector<Vector3r>>& startPieces,
+        unsigned int maxCuts)
+    {
+        std::vector<std::vector<Vector3r>> pieces = startPieces;
+        CutsToZeroOutcome outcome;
+
+        while (outcome.cuts < maxCuts)
+        {
+            const TanglementAnalyzer::TanglementAnalysisResult tanglement =
+                TanglementAnalyzer::analyzeTanglementGeometryOnly(
+                    pieces,
+                    {},
+                    g_cfg.rope,
+                    g_cfg.selfCollision);
+            const int threading =
+                TanglementAnalyzer::computeThreadingMetrics(tanglement).totalThreadingCount;
+            if (threading == 0)
+            {
+                outcome.resolved = true;
+                return outcome;
+            }
+
+            const VirtualCutTarget target = findSmallestHoopMidpointCut(tanglement, pieces);
+            if (!target.valid || !splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
+                break;
+
+            ++outcome.cuts;
+        }
+
+        outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
+        if (!outcome.resolved)
+            outcome.cuts = maxCuts;
+        return outcome;
+    }
+
+    static CutsToZeroOutcome runMaxCurvatureCutsToZero(
+        const std::vector<std::vector<Vector3r>>& startPieces,
+        unsigned int maxCuts)
+    {
+        std::vector<std::vector<Vector3r>> pieces = startPieces;
+        CutsToZeroOutcome outcome;
+
+        while (outcome.cuts < maxCuts)
+        {
+            const int threading = computeThreadingCountGeometryOnly(pieces);
+            if (threading == 0)
+            {
+                outcome.resolved = true;
+                return outcome;
+            }
+
+            const VirtualCutTarget target = findMaxCurvatureCutTarget(
+                pieces,
+                g_cfg.selfCollision.excludeArcLength);
             if (!target.valid || !splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
                 break;
 
@@ -1329,6 +1500,50 @@ static void evaluateAndRecordCutHeuristicSample()
         }
     }
 
+    int smallestHoopDelta = 0;
+    int smallestHoopSpan = 0;
+    int smallestHoopScore = 0;
+    if (beforeThreading > 0)
+    {
+        const VirtualCutTarget smallestTarget =
+            findSmallestHoopMidpointCut(tanglement, ropePieces);
+        if (smallestTarget.valid)
+        {
+            smallestHoopDelta = computeVirtualCutDeltaThreading(
+                ropePieces,
+                beforeThreading,
+                smallestTarget);
+            smallestHoopSpan = smallestTarget.hoopSpan;
+            smallestHoopScore = smallestTarget.hoopScore;
+        }
+    }
+
+    int maxCurvatureDelta = 0;
+    Real maxCurvature = static_cast<Real>(0.0);
+    if (beforeThreading > 0)
+    {
+        const VirtualCutTarget curvatureTarget = findMaxCurvatureCutTarget(
+            ropePieces,
+            g_cfg.selfCollision.excludeArcLength);
+        if (curvatureTarget.valid)
+        {
+            maxCurvatureDelta = computeVirtualCutDeltaThreading(
+                ropePieces,
+                beforeThreading,
+                curvatureTarget);
+            maxCurvature = curvatureTarget.curvature;
+        }
+    }
+
+    SingleCutOracleResult oracle;
+    if (g_evalOracleEnabled && beforeThreading > 0)
+    {
+        oracle = findBestSingleCutOracle(
+            ropePieces,
+            beforeThreading,
+            g_cfg.selfCollision.excludeArcLength);
+    }
+
     Real randomMean = static_cast<Real>(0.0);
     Real randomStd = static_cast<Real>(0.0);
     if (beforeThreading > 0)
@@ -1418,7 +1633,16 @@ static void evaluateAndRecordCutHeuristicSample()
         << biggestHoopDelta << '\t'
         << biggestHoopSpan << '\t'
         << biggestHoopScore << '\t'
-        << hoopCount << '\n';
+        << hoopCount << '\t'
+        << smallestHoopDelta << '\t'
+        << smallestHoopSpan << '\t'
+        << smallestHoopScore << '\t'
+        << maxCurvatureDelta << '\t'
+        << maxCurvature << '\t'
+        << oracle.delta << '\t'
+        << (oracle.evaluated ? 1 : 0) << '\t'
+        << (oracle.target.valid ? static_cast<int>(oracle.target.pieceIndex) : -1) << '\t'
+        << (oracle.target.valid ? static_cast<int>(oracle.target.edgeIndex) : -1) << '\n';
 
     ++g_evalSamplesWritten;
     std::cout << "[cut-eval] seed=" << record.seed
@@ -1428,6 +1652,9 @@ static void evaluateAndRecordCutHeuristicSample()
               << " randomMean=" << randomMean
               << " randomHoopMean=" << randomHoopMean
               << " biggestHoopDelta=" << biggestHoopDelta
+              << " smallestHoopDelta=" << smallestHoopDelta
+              << " maxCurvatureDelta=" << maxCurvatureDelta
+              << " oracleDelta=" << oracle.delta
               << " hoops=" << hoopCount
               << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
               << std::endl;
@@ -1457,6 +1684,8 @@ static void evaluateAndRecordCutsToZeroSample()
 
     CutsToZeroOutcome heuristicOutcome;
     CutsToZeroOutcome biggestHoopOutcome;
+    CutsToZeroOutcome smallestHoopOutcome;
+    CutsToZeroOutcome maxCurvatureOutcome;
     Real randomMean = static_cast<Real>(0.0);
     Real randomStd = static_cast<Real>(0.0);
     Real randomResolvedRate = static_cast<Real>(1.0);
@@ -1468,6 +1697,8 @@ static void evaluateAndRecordCutsToZeroSample()
     {
         heuristicOutcome.resolved = true;
         biggestHoopOutcome.resolved = true;
+        smallestHoopOutcome.resolved = true;
+        maxCurvatureOutcome.resolved = true;
     }
     else
     {
@@ -1475,6 +1706,12 @@ static void evaluateAndRecordCutsToZeroSample()
             ropePieces,
             g_evalCutsToZeroMaxCuts);
         biggestHoopOutcome = runBiggestHoopCutsToZero(
+            ropePieces,
+            g_evalCutsToZeroMaxCuts);
+        smallestHoopOutcome = runSmallestHoopCutsToZero(
+            ropePieces,
+            g_evalCutsToZeroMaxCuts);
+        maxCurvatureOutcome = runMaxCurvatureCutsToZero(
             ropePieces,
             g_evalCutsToZeroMaxCuts);
 
@@ -1566,7 +1803,11 @@ static void evaluateAndRecordCutsToZeroSample()
         << randomHoopResolvedRate << '\t'
         << biggestHoopOutcome.cuts << '\t'
         << (biggestHoopOutcome.resolved ? 1 : 0) << '\t'
-        << hoopCount << '\n';
+        << hoopCount << '\t'
+        << smallestHoopOutcome.cuts << '\t'
+        << (smallestHoopOutcome.resolved ? 1 : 0) << '\t'
+        << maxCurvatureOutcome.cuts << '\t'
+        << (maxCurvatureOutcome.resolved ? 1 : 0) << '\n';
 
     ++g_evalSamplesWritten;
     std::cout << "[cuts-to-zero] seed=" << record.seed
@@ -1580,6 +1821,10 @@ static void evaluateAndRecordCutsToZeroSample()
               << " randomHoopResolvedRate=" << randomHoopResolvedRate
               << " biggestHoopCuts=" << biggestHoopOutcome.cuts
               << " biggestHoopResolved=" << (biggestHoopOutcome.resolved ? 1 : 0)
+              << " smallestHoopCuts=" << smallestHoopOutcome.cuts
+              << " smallestHoopResolved=" << (smallestHoopOutcome.resolved ? 1 : 0)
+              << " maxCurvatureCuts=" << maxCurvatureOutcome.cuts
+              << " maxCurvatureResolved=" << (maxCurvatureOutcome.resolved ? 1 : 0)
               << " hoops=" << hoopCount
               << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
               << std::endl;
@@ -1678,6 +1923,11 @@ int main(int argc, char** argv)
         }
         else if (arg == "--eval-run")
         {
+            g_evalRunEnabled = true;
+        }
+        else if (arg == "--eval-oracle")
+        {
+            g_evalOracleEnabled = true;
             g_evalRunEnabled = true;
         }
         else if (arg == "--eval-cuts-to-zero")

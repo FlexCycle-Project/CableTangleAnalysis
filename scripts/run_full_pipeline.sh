@@ -12,6 +12,7 @@ WORKERS=8
 OUT_DIR=""
 FORCE=0
 EVAL_RANDOM_TRIALS=10
+EVAL_ORACLE=1
 CTZ_MAX_CUTS=10
 CTZ_RANDOM_TRIALS=20
 
@@ -28,9 +29,11 @@ Options:
   --workers N               Number of parallel workers (default: 8)
   --out DIR                 Output directory (default: results/catalog_<timestamp>)
   --force                   Overwrite output files in an existing --out directory
-  --eval-random-trials N    Cut-eval random trials per seed (default: 10)
+  --oracle                  Enable the exhaustive single-cut oracle (default)
+  --no-oracle               Skip the exhaustive single-cut oracle
+  --eval-random-trials N    Cut-eval random edge/hoop trials per seed (default: 10)
   --ctz-max-cuts N          Max cuts per seed in cuts-to-zero (default: 10)
-  --ctz-random-trials N     Cuts-to-zero random trials per seed (default: 20)
+  --ctz-random-trials N     Cuts-to-zero random edge/hoop trials per seed (default: 20)
   -h, --help                Show this help
 
 Notes:
@@ -72,6 +75,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force)
       FORCE=1
+      shift
+      ;;
+    --oracle)
+      EVAL_ORACLE=1
+      shift
+      ;;
+    --no-oracle)
+      EVAL_ORACLE=0
       shift
       ;;
     --eval-random-trials)
@@ -183,6 +194,10 @@ run_worker() {
   local cut_part="$OUT_DIR/parts/cut_${worker}.tsv"
   local ctz_part="$OUT_DIR/parts/ctz_${worker}.tsv"
   local seed_bank="$OUT_DIR/parts/seed_bank_${worker}.txt"
+  local oracle_args=()
+  if [ "$EVAL_ORACLE" -eq 1 ]; then
+    oracle_args+=(--eval-oracle)
+  fi
 
   mkdir -p "$work_dir"
   cd "$work_dir"
@@ -202,7 +217,8 @@ run_worker() {
       --catalog-file="$catalog_part" \
       --eval-run \
       --eval-output="$cut_part" \
-      --eval-random-trials="$EVAL_RANDOM_TRIALS"
+      --eval-random-trials="$EVAL_RANDOM_TRIALS" \
+      "${oracle_args[@]}"
 
     echo "[worker $worker] cuts-to-zero evaluation"
     "$BIN" \
@@ -309,6 +325,7 @@ ELAPSED=$((END_TS - START_TS))
   echo "cut_rows=$cut_rows"
   echo "ctz_rows=$ctz_rows"
   echo "eval_random_trials=$EVAL_RANDOM_TRIALS"
+  echo "eval_oracle=$EVAL_ORACLE"
   echo "ctz_max_cuts=$CTZ_MAX_CUTS"
   echo "ctz_random_trials=$CTZ_RANDOM_TRIALS"
 } | tee "$OUT_DIR/summary.txt"
