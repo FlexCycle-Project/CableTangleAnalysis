@@ -24,14 +24,14 @@ This branch (`linux`) contains the Linux port of the demo and the batch analysis
 - OpenGL and the usual X11/GLFW development packages.
 - Git and network access during the first CMake configure, because CMake fetches pinned revisions of **Discregrid** and **GenericParameters**.
 - Optional: OpenMP.
-- Python 3 with NumPy for the PCA complexity pass (skip it with `--no-complexity`).
+- Python 3 with NumPy and Matplotlib for complexity and oracle analysis (skip it with `--no-complexity` / `--no-oracle-analysis`).
 
 Most other dependencies are bundled under `extern/` (GLFW, imgui, glew, freeglut, hapPLY, md5). KymoKnot is bundled under `KymoKnot-clone/`.
 
 On Debian/Ubuntu, a typical dependency set is:
 
 ```bash
-sudo apt install build-essential cmake git libeigen3-dev python3-numpy \
+sudo apt install build-essential cmake git libeigen3-dev python3-numpy python3-matplotlib \
   libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
   libxcursor-dev libxi-dev
 ```
@@ -170,13 +170,15 @@ By default it generates three rest-state-creep variants:
 | `current/` | 0.02 |
 | `high/` | 0.2 |
 
-Each variant contains `catalog.tsv`, `cut_eval.tsv`, `cuts_to_zero.tsv`, a `summary.txt`, and per-worker logs. A top-level `manifest.tsv` lists all variants. Use `--creep <value>` to run a single creep value instead (written directly to `--out`), or override the high/current values with `--creep-high` / `--creep-current`.
+Each variant contains `catalog.tsv`, `cut_eval.tsv`, `cuts_to_zero.tsv`, a `summary.txt`, and per-worker logs. A top-level `manifest.tsv` lists all variants. Use `--creep <value>` to run a single creep value instead (written directly to `--out`), or override the high/current values with `--creep-high` / `--creep-current`. Per-variant PCA and oracle analysis run in the three-variant mode.
 
 The script also sets `--creep-settle-steps=300` and lowers the creep activation threshold to `0.0001`. With the code default threshold (`0.01`), sustained mismatch under gravity-only settling stays below the threshold, so the creep variants would otherwise be identical. Override these with `--creep-settle-steps` and `--creep-threshold`.
 
 The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window. It runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds. Running all three creep variants takes roughly three times as long as a single variant.
 
-After the simulation stages it runs [`scripts/compute_complexity.py`](scripts/compute_complexity.py), which fits the PCA complexity model and joins the resulting score into the catalog and strategy outputs under `complexity/`. This requires Python 3 with NumPy. Pass `--no-complexity` to skip it.
+After the simulation stages it runs [`scripts/compute_complexity.py`](scripts/compute_complexity.py), which fits the PCA complexity model and joins the resulting score into the catalog and strategy outputs under `complexity/`. It then fits a separate PCA per creep variant under `complexity/per_variant/`. This requires Python 3 with NumPy. Pass `--no-complexity` to skip it, or `--no-complexity-per-variant` to skip only the per-variant pass.
+
+Finally, [`scripts/analyze_oracle.py`](scripts/analyze_oracle.py) analyses oracle single-cut performance against threading count and complexity score under `analysis_oracle/`. It requires Matplotlib; skip it with `--no-oracle-analysis`.
 
 ### Cut strategies
 
@@ -216,7 +218,7 @@ outsideKnotCurvature
 
 The first principal component is used as the metric weighting. The score is the PC1 projection of the standardized metrics; the loadings are written to `complexity_model.tsv`. PC1 is sign-oriented so the summed loadings are positive, but individual loadings may be negative because PC1 describes a trade-off direction.
 
-By default, PCA is fitted on rows identified by KymoKnot (`--complexity-filter identified`), excluding `none` and `??` rows. If fewer than three rows match, the script falls back to all rows and prints a warning. Other filters are `all`, `unidentified`, and `non-unknot`. When the pipeline runs multiple creep variants, all variants are pooled so the complexity score uses one common scale. To fit a separate model per variant, call `compute_complexity.py` once per catalog instead.
+By default, PCA is fitted on rows identified by KymoKnot (`--complexity-filter identified`), excluding `none` and `??` rows. If fewer than three rows match, the script falls back to all rows and prints a warning. Other filters are `all`, `unidentified`, and `non-unknot`. When the pipeline runs multiple creep variants, all variants are pooled so the complexity score uses one common scale. The pipeline also fits a separate model per creep variant under `complexity/per_variant/<variant>/`, so each setting has its own weights and scores.
 
 Outputs:
 
@@ -232,6 +234,27 @@ Outputs:
 | `complexity/strategy_correlations.tsv` | Pearson correlation between complexity and strategy metrics |
 
 The simulation and strategy evaluation remain complexity-agnostic; the PCA score is applied in post-processing. The legacy `entanglementScore` column is still written by the catalog, but `complexity_score` is the PCA-derived score.
+
+### Oracle analysis
+
+`scripts/analyze_oracle.py` is the second-pass oracle analysis. It uses the per-variant complexity scores from the first pass and the `delta_oracle` results from cut evaluation, and reports:
+
+- oracle threading removal by initial threading count `T_before`
+- oracle threading removal by complexity quartile
+- oracle fraction removed (`delta_oracle / T_before`) by both dimensions
+- how often the oracle beats the heuristic strategy
+
+Outputs per variant under `analysis_oracle/<variant>/`:
+
+```text
+oracle_summary.tsv
+oracle_by_threading.tsv
+oracle_by_complexity.tsv
+oracle_by_threading_complexity.tsv
+oracle_by_threading.pdf
+oracle_by_complexity.pdf
+oracle_heatmap.pdf
+```
 
 To recompute the complexity pass on an existing dataset:
 
@@ -391,7 +414,7 @@ git submodule update --init --recursive
 - **CMake configure fails while cloning Discregrid/GenericParameters**: check Git/network access or provide the preinstalled paths shown above.
 - **Evaluation mode fails to open a window**: unattended modes still need an OpenGL context; use `xvfb-run -a`.
 - **Seed bank or catalog not found**: pass `--seed-bank` / `--catalog-file`, or run from the repository root so the default paths resolve.
-- **Complexity pass fails with NumPy missing**: install `python3-numpy` or pass `--no-complexity` to the pipeline.
+- **Complexity/oracle analysis fails with missing Python packages**: install `requirements.txt` in a virtual environment, or pass `--no-complexity` / `--no-oracle-analysis`.
 - **Knot type looks wrong for complex knots**: KymoKnot uses Alexander determinants at `t=-1` and `t=-2`; complex knots can share determinants with other knots. See `KymoKnot-clone/README.md` for details.
 
 ## License and upstream

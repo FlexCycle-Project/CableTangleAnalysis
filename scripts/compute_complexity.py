@@ -361,10 +361,12 @@ def write_scores(out_dir: Path, scored: list[dict[str, Any]], features: list[str
 def augment_catalog(
     meta: dict[str, Any],
     scores: dict[tuple[str, str], dict[str, Any]],
+    output_dir: Path | None = None,
 ) -> Path:
     catalog = meta["path"]
     variant = meta["variant"]
-    output = catalog.with_name(f"{catalog.stem}_with_complexity{catalog.suffix}")
+    destination = output_dir if output_dir is not None else catalog.parent
+    output = destination / f"{catalog.stem}_with_complexity{catalog.suffix}"
     fieldnames = list(meta["fieldnames"])
     for name in ("complexity_pc1", "complexity_score", "complexity_percentile"):
         if name not in fieldnames:
@@ -388,6 +390,7 @@ def augment_eval_file(
     path: Path,
     variant: str,
     scores: dict[tuple[str, str], dict[str, Any]],
+    output_dir: Path | None = None,
 ) -> Path | None:
     if not path.is_file():
         return None
@@ -410,7 +413,8 @@ def augment_eval_file(
         out_row["complexity_percentile"] = fmt(score["percentile"]) if score else ""
         output_rows.append(out_row)
 
-    output = path.with_name(f"{path.stem}_with_complexity{path.suffix}")
+    destination = output_dir if output_dir is not None else path.parent
+    output = destination / f"{path.stem}_with_complexity{path.suffix}"
     write_tsv(output, output_rows, fieldnames)
     return output
 
@@ -499,6 +503,124 @@ def summarize_strategy_metrics(
     return summary_rows, correlation_rows
 
 
+def analyze(
+    catalogs: list[Path],
+    out_dir: Path,
+    features: list[str],
+    knot_filter: str,
+    min_training_rows: int,
+    no_eval_join: bool,
+    augment_dir: Path | None = None,
+) -> list[dict[str, str]]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    catalogs_meta, groups = load_groups(catalogs, features)
+    if not groups:
+        raise SystemExit("error: no valid catalog rows found")
+
+    training_groups, filter_used = select_training_groups(
+        groups, knot_filter, min_training_rows
+    )
+    model = fit_pca(training_groups, features)
+    scored = score_groups(groups, model)
+    scores = score_map(scored)
+
+    write_model(
+        out_dir,
+        model,
+        len(training_groups),
+        len(groups),
+        knot_filter,
+        filter_used,
+    )
+    write_scores(out_dir, scored, features)
+
+    manifest_rows: list[dict[str, str]] = []
+    eval_rows: dict[str, dict[str, list[dict[str, str]]]] = {
+        "cut_eval": {},
+        "cuts_to_zero": {},
+    }
+
+    for meta in catalogs_meta:
+        variant = meta["variant"]
+        variant_dir = meta["path"].parent
+        augmented_catalog = augment_catalog(meta, scores, augment_dir)
+
+        cut_joined = None
+        ctz_joined = None
+        if not no_eval_join:
+            cut_joined = augment_eval_file(
+                variant_dir / "cut_eval.tsv", variant, scores, augment_dir
+            )
+            ctz_joined = augment_eval_file(
+                variant_dir / "cuts_to_zero.tsv", variant, scores, augment_dir
+            )
+            if cut_joined is not None:
+                eval_rows["cut_eval"][variant] = read_tsv(cut_joined)[0]
+            if ctz_joined is not None:
+                eval_rows["cuts_to_zero"][variant] = read_tsv(ctz_joined)[0]
+
+        manifest_rows.append(
+            {
+                "variant": variant,
+                "catalog": str(meta["path"]),
+                "catalog_with_complexity": str(augmented_catalog),
+                "cut_eval_with_complexity": str(cut_joined) if cut_joined else "",
+                "cuts_to_zero_with_complexity": str(ctz_joined) if ctz_joined else "",
+            }
+        )
+
+    summary_rows, correlation_rows = summarize_strategy_metrics(
+        "cut_eval", eval_rows["cut_eval"], CUT_METRICS
+    )
+    ctz_summary_rows, ctz_correlation_rows = summarize_strategy_metrics(
+        "cuts_to_zero", eval_rows["cuts_to_zero"], CTZ_METRICS
+    )
+    summary_rows.extend(ctz_summary_rows)
+    correlation_rows.extend(ctz_correlation_rows)
+
+    write_tsv(
+        out_dir / "complexity_manifest.tsv",
+        manifest_rows,
+        [
+            "variant",
+            "catalog",
+            "catalog_with_complexity",
+            "cut_eval_with_complexity",
+            "cuts_to_zero_with_complexity",
+        ],
+    )
+    write_tsv(
+        out_dir / "strategy_by_complexity.tsv",
+        summary_rows,
+        [
+            "eval",
+            "variant",
+            "complexity_bin",
+            "complexity_min",
+            "complexity_max",
+            "metric",
+            "n",
+            "mean",
+            "median",
+        ],
+    )
+    write_tsv(
+        out_dir / "strategy_correlations.tsv",
+        correlation_rows,
+        ["eval", "variant", "metric", "pearson_r", "n"],
+    )
+
+    print(f"PCA rows: {len(training_groups)} of {len(groups)}")
+    print(f"PC1 explained variance: {model['explained'][0] * 100.0:.2f}%")
+    print("PC1 weights:")
+    for name, loading in zip(features, model["loadings"]):
+        print(f"  {name}: {loading:.6f}")
+    print(f"Wrote complexity outputs to: {out_dir}")
+
+    return manifest_rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("catalogs", nargs="+", type=Path, help="Catalog TSV file(s)")
@@ -526,113 +648,64 @@ def main() -> None:
         action="store_true",
         help="Only augment the catalog; do not join complexity into evaluation TSVs",
     )
+    parser.add_argument(
+        "--per-variant",
+        action="store_true",
+        help="Fit a separate PCA model for each catalog and write one subdirectory per variant",
+    )
     args = parser.parse_args()
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-
-    catalogs_meta, groups = load_groups(args.catalogs, args.features)
-    if not groups:
-        raise SystemExit("error: no valid catalog rows found")
-
-    training_groups, filter_used = select_training_groups(
-        groups, args.knot_filter, args.min_training_rows
-    )
-    model = fit_pca(training_groups, args.features)
-    scored = score_groups(groups, model)
-    scores = score_map(scored)
-
-    write_model(
-        args.out_dir,
-        model,
-        len(training_groups),
-        len(groups),
-        args.knot_filter,
-        filter_used,
-    )
-    write_scores(args.out_dir, scored, args.features)
-
-    manifest_rows: list[dict[str, str]] = []
-    eval_rows: dict[str, dict[str, list[dict[str, str]]]] = {
-        "cut_eval": {},
-        "cuts_to_zero": {},
-    }
-
-    for meta in catalogs_meta:
-        variant = meta["variant"]
-        variant_dir = meta["path"].parent
-        augmented_catalog = augment_catalog(meta, scores)
-
-        cut_joined = None
-        ctz_joined = None
-        if not args.no_eval_join:
-            cut_joined = augment_eval_file(
-                variant_dir / "cut_eval.tsv", variant, scores
+    if args.per_variant:
+        used_labels: set[str] = set()
+        manifest_rows: list[dict[str, str]] = []
+        for catalog in args.catalogs:
+            label = unique_variant_label(catalog, used_labels)
+            variant_out = args.out_dir / label
+            print(f"\n=== PCA for variant '{label}' ===")
+            rows = analyze(
+                [catalog],
+                variant_out,
+                args.features,
+                args.knot_filter,
+                args.min_training_rows,
+                args.no_eval_join,
+                augment_dir=variant_out,
             )
-            ctz_joined = augment_eval_file(
-                variant_dir / "cuts_to_zero.tsv", variant, scores
-            )
-            if cut_joined is not None:
-                eval_rows["cut_eval"][variant] = read_tsv(cut_joined)[0]
-            if ctz_joined is not None:
-                eval_rows["cuts_to_zero"][variant] = read_tsv(ctz_joined)[0]
+            for row in rows:
+                manifest_rows.append(
+                    {
+                        "variant": row["variant"],
+                        "out_dir": str(variant_out),
+                        "model": str(variant_out / "complexity_model.tsv"),
+                        "scores": str(variant_out / "complexity_scores.tsv"),
+                        "catalog_with_complexity": row["catalog_with_complexity"],
+                        "cut_eval_with_complexity": row["cut_eval_with_complexity"],
+                        "cuts_to_zero_with_complexity": row["cuts_to_zero_with_complexity"],
+                    }
+                )
 
-        manifest_rows.append(
-            {
-                "variant": variant,
-                "catalog": str(meta["path"]),
-                "catalog_with_complexity": str(augmented_catalog),
-                "cut_eval_with_complexity": str(cut_joined) if cut_joined else "",
-                "cuts_to_zero_with_complexity": str(ctz_joined) if ctz_joined else "",
-            }
+        write_tsv(
+            args.out_dir / "per_variant_manifest.tsv",
+            manifest_rows,
+            [
+                "variant",
+                "out_dir",
+                "model",
+                "scores",
+                "catalog_with_complexity",
+                "cut_eval_with_complexity",
+                "cuts_to_zero_with_complexity",
+            ],
         )
-
-    summary_rows, correlation_rows = summarize_strategy_metrics(
-        "cut_eval", eval_rows["cut_eval"], CUT_METRICS
-    )
-    ctz_summary_rows, ctz_correlation_rows = summarize_strategy_metrics(
-        "cuts_to_zero", eval_rows["cuts_to_zero"], CTZ_METRICS
-    )
-    summary_rows.extend(ctz_summary_rows)
-    correlation_rows.extend(ctz_correlation_rows)
-
-    write_tsv(
-        args.out_dir / "complexity_manifest.tsv",
-        manifest_rows,
-        [
-            "variant",
-            "catalog",
-            "catalog_with_complexity",
-            "cut_eval_with_complexity",
-            "cuts_to_zero_with_complexity",
-        ],
-    )
-    write_tsv(
-        args.out_dir / "strategy_by_complexity.tsv",
-        summary_rows,
-        [
-            "eval",
-            "variant",
-            "complexity_bin",
-            "complexity_min",
-            "complexity_max",
-            "metric",
-            "n",
-            "mean",
-            "median",
-        ],
-    )
-    write_tsv(
-        args.out_dir / "strategy_correlations.tsv",
-        correlation_rows,
-        ["eval", "variant", "metric", "pearson_r", "n"],
-    )
-
-    print(f"PCA rows: {len(training_groups)} of {len(groups)}")
-    print(f"PC1 explained variance: {model['explained'][0] * 100.0:.2f}%")
-    print("PC1 weights:")
-    for name, loading in zip(args.features, model["loadings"]):
-        print(f"  {name}: {loading:.6f}")
-    print(f"Wrote complexity outputs to: {args.out_dir}")
+    else:
+        analyze(
+            args.catalogs,
+            args.out_dir,
+            args.features,
+            args.knot_filter,
+            args.min_training_rows,
+            args.no_eval_join,
+        )
 
 
 if __name__ == "__main__":

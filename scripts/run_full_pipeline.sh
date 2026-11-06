@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${BIN:-$ROOT/bin/MyCableDemo}"
 KYMOKNOT_ROOT="${KYMOKNOT_ROOT:-$ROOT/KymoKnot-clone}"
 KYMOKNOT_BIN="${KYMOKNOT_BIN:-$KYMOKNOT_ROOT/KymoKnot_linear.x}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [ "$PYTHON_BIN" = "python3" ] && [ -x "$ROOT/.venv/bin/python" ]; then
+  PYTHON_BIN="$ROOT/.venv/bin/python"
+fi
 
 START_SEED=1
 END_SEED=1000
@@ -17,6 +21,8 @@ CTZ_MAX_CUTS=10
 CTZ_RANDOM_TRIALS=20
 RUN_COMPLEXITY=1
 COMPLEXITY_FILTER=identified
+COMPLEXITY_PER_VARIANT=1
+RUN_ORACLE_ANALYSIS=1
 SINGLE_CREEP=""
 CREEP_CURRENT=0.02
 CREEP_HIGH=0.2
@@ -46,6 +52,9 @@ Options:
   --oracle                  Enable the exhaustive single-cut oracle (default)
   --no-oracle               Skip the exhaustive single-cut oracle
   --no-complexity           Skip the PCA-derived complexity post-processing
+  --no-complexity-per-variant
+                            Skip the separate-PCA-per-creep pass (default: on)
+  --no-oracle-analysis      Skip the oracle vs threading/complexity analysis
   --complexity-filter MODE  PCA training rows: all, identified, unidentified,
                             or non-unknot (default: identified)
   --creep V                 Run only this creep value (single-variant mode)
@@ -70,8 +79,9 @@ Notes:
   * The script lowers the creep activation threshold to 0.0001. With the code
     default of 0.01, the mismatch under gravity-only settling stays below the
     threshold and all creep variants produce identical samples.
-  * The complexity pass requires Python 3 with NumPy. Use --no-complexity to
-    skip it.
+  * The complexity pass requires Python 3 with NumPy and Matplotlib.
+    Use --no-complexity or --no-oracle-analysis to skip parts of it.
+  * Per-variant PCA and the oracle analysis run in multi-variant mode only.
 EOF
 }
 
@@ -116,6 +126,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-complexity)
       RUN_COMPLEXITY=0
+      shift
+      ;;
+    --no-complexity-per-variant)
+      COMPLEXITY_PER_VARIANT=0
+      shift
+      ;;
+    --no-oracle-analysis)
+      RUN_ORACLE_ANALYSIS=0
       shift
       ;;
     --complexity-filter)
@@ -495,17 +513,42 @@ TOTAL_ELAPSED=$((END_ALL_TS - START_ALL_TS))
 if [ "$RUN_COMPLEXITY" -eq 1 ] && [ "$TOTAL" -lt 2 ]; then
   echo "warning: skipping complexity pass; at least two seeds are required for PCA"
 elif [ "$RUN_COMPLEXITY" -eq 1 ]; then
-  command -v python3 >/dev/null 2>&1 || die "python3 not found; use --no-complexity to skip the PCA pass"
-  python3 -c 'import numpy' >/dev/null 2>&1 || \
-    die "NumPy not found; install python3-numpy or use --no-complexity"
+  { [ -x "$PYTHON_BIN" ] || command -v "$PYTHON_BIN" >/dev/null 2>&1; } || \
+    die "python3 not found; use --no-complexity to skip the PCA pass"
+  "$PYTHON_BIN" -c 'import numpy' >/dev/null 2>&1 || \
+    die "NumPy not found; install requirements.txt or use --no-complexity"
 
-  echo "running PCA complexity pass"
-  python3 "$ROOT/scripts/compute_complexity.py" \
+  echo "running pooled PCA complexity pass"
+  "$PYTHON_BIN" "$ROOT/scripts/compute_complexity.py" \
     "${variant_catalogs[@]}" \
     --out-dir "$OUT_DIR/complexity" \
     --knot-filter "$COMPLEXITY_FILTER"
 
-  echo "complexity:    $OUT_DIR/complexity"
+  if [ "$MODE" = "multi" ] && [ "$COMPLEXITY_PER_VARIANT" -eq 1 ]; then
+    echo "running per-variant PCA complexity pass"
+    "$PYTHON_BIN" "$ROOT/scripts/compute_complexity.py" \
+      "${variant_catalogs[@]}" \
+      --out-dir "$OUT_DIR/complexity/per_variant" \
+      --knot-filter "$COMPLEXITY_FILTER" \
+      --per-variant
+
+    echo "per-variant:   $OUT_DIR/complexity/per_variant"
+  fi
+fi
+
+if [ "$MODE" = "multi" ] && [ "$RUN_ORACLE_ANALYSIS" -eq 1 ] && [ "$EVAL_ORACLE" -eq 1 ] && [ "$TOTAL" -ge 2 ]; then
+  { [ -x "$PYTHON_BIN" ] || command -v "$PYTHON_BIN" >/dev/null 2>&1; } || \
+    die "python3 not found; use --no-oracle-analysis"
+  "$PYTHON_BIN" -c 'import matplotlib' >/dev/null 2>&1 || \
+    die "matplotlib not found; install requirements.txt or use --no-oracle-analysis"
+
+  echo "running oracle threading/complexity analysis"
+  "$PYTHON_BIN" "$ROOT/scripts/analyze_oracle.py" \
+    --dataset-root "$OUT_DIR" \
+    --complexity-root "$OUT_DIR/complexity/per_variant" \
+    --out-dir "$OUT_DIR/analysis_oracle"
+
+  echo "oracle analysis: $OUT_DIR/analysis_oracle"
 fi
 
 echo "dataset root:  $OUT_DIR"
