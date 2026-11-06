@@ -6,3 +6,4 @@ opencode.json
 results/
 __pycache__/
 *.pyc
+.venv/
