@@ -88,9 +88,15 @@ namespace PBD
 			const DWORD length = GetTempPathA(MAX_PATH, tempBuffer);
 			if (length > 0 && length < MAX_PATH)
 				tempRoot = tempBuffer;
-#endif
 			if (tempRoot.empty())
 				tempRoot = "C:/Temp";
+#else
+			const char* tmpDir = std::getenv("TMPDIR");
+			if (tmpDir != nullptr && tmpDir[0] != '\0')
+				tempRoot = tmpDir;
+			if (tempRoot.empty())
+				tempRoot = "/tmp";
+#endif
 
 			const std::string workDir = Utilities::FileSystem::normalizePath(
 				tempRoot + "/MyCableDemo/KymoKnot/run_" +
