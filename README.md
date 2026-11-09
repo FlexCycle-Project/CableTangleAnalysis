@@ -216,7 +216,9 @@ totalCurvature
 outsideKnotCurvature
 ```
 
-The first principal component is used as the metric weighting. The score is the PC1 projection of the standardized metrics; the loadings are written to `complexity_model.tsv`. PC1 is sign-oriented so the summed loadings are positive, but individual loadings may be negative because PC1 describes a trade-off direction.
+The first principal component is used as the metric weighting. By default (`--pca-orientation positive`), the absolute PC1 loadings are used so every metric contributes in the positive complexity direction: higher values always mean a more complex tangle. The model file writes the actual weight in `pc1_loading` and the raw signed PC1 loading in `pc1_loading_signed`.
+
+Use `--pca-orientation signed` to keep the exact signed PC1 projection instead. In that mode individual loadings may be negative because PC1 describes a trade-off direction.
 
 By default, PCA is fitted on rows identified by KymoKnot (`--complexity-filter identified`), excluding `none` and `??` rows. If fewer than three rows match, the script falls back to all rows and prints a warning. Other filters are `all`, `unidentified`, and `non-unknot`. When the pipeline runs multiple creep variants, all variants are pooled so the complexity score uses one common scale. The pipeline also fits a separate model per creep variant under `complexity/per_variant/<variant>/`, so each setting has its own weights and scores.
 
@@ -224,10 +226,10 @@ Outputs:
 
 | File | Contents |
 | --- | --- |
-| `complexity/complexity_model.tsv` | Feature means, standard deviations, and PC1 weights |
-| `complexity/complexity_summary.txt` | Training rows, filter, explained variance, orientation |
-| `complexity/complexity_scores.tsv` | Per-seed PC1, normalized score, percentile, raw features |
-| `<variant>/catalog_with_complexity.tsv` | Catalog with `complexity_pc1`, `complexity_score`, `complexity_percentile` |
+| `complexity/complexity_model.tsv` | Feature means, standard deviations, oriented PC1 weight, and signed PC1 loading |
+| `complexity/complexity_summary.txt` | Training rows, filter, explained variance, orientation mode |
+| `complexity/complexity_scores.tsv` | Per-seed weighted score, signed PC1, normalized score, percentile, raw features |
+| `<variant>/catalog_with_complexity.tsv` | Catalog with `complexity_pc1`, `complexity_pc1_signed`, `complexity_score`, `complexity_percentile` |
 | `<variant>/cut_eval_with_complexity.tsv` | Cut evaluation joined to the complexity score |
 | `<variant>/cuts_to_zero_with_complexity.tsv` | Cuts-to-zero evaluation joined to the complexity score |
 | `complexity/strategy_by_complexity.tsv` | Strategy means/medians by complexity quartile |

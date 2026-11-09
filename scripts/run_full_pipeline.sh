@@ -21,6 +21,7 @@ CTZ_MAX_CUTS=10
 CTZ_RANDOM_TRIALS=20
 RUN_COMPLEXITY=1
 COMPLEXITY_FILTER=identified
+PCA_ORIENTATION=positive
 COMPLEXITY_PER_VARIANT=1
 RUN_ORACLE_ANALYSIS=1
 SINGLE_CREEP=""
@@ -57,6 +58,8 @@ Options:
   --no-oracle-analysis      Skip the oracle vs threading/complexity analysis
   --complexity-filter MODE  PCA training rows: all, identified, unidentified,
                             or non-unknot (default: identified)
+  --pca-orientation MODE    positive: absolute PC1 weights (default);
+                            signed: keep signed PC1 projection
   --creep V                 Run only this creep value (single-variant mode)
   --creep-current V         "current" creep value (default: 0.02)
   --creep-high V            "high" creep value (default: 0.2)
@@ -141,6 +144,11 @@ while [ "$#" -gt 0 ]; do
       COMPLEXITY_FILTER="$2"
       shift 2
       ;;
+    --pca-orientation)
+      [ "$#" -ge 2 ] || die "--pca-orientation requires a value"
+      PCA_ORIENTATION="$2"
+      shift 2
+      ;;
     --creep)
       [ "$#" -ge 2 ] || die "--creep requires a value"
       SINGLE_CREEP="$2"
@@ -218,6 +226,10 @@ fi
 case "$COMPLEXITY_FILTER" in
   all|identified|unidentified|non-unknot) ;;
   *) die "invalid --complexity-filter '$COMPLEXITY_FILTER'" ;;
+esac
+case "$PCA_ORIENTATION" in
+  positive|signed) ;;
+  *) die "invalid --pca-orientation '$PCA_ORIENTATION'" ;;
 esac
 [ "$EVAL_RANDOM_TRIALS" -ge 1 ] || die "--eval-random-trials must be at least 1"
 [ "$CTZ_MAX_CUTS" -ge 1 ] || die "--ctz-max-cuts must be at least 1"
@@ -522,7 +534,8 @@ elif [ "$RUN_COMPLEXITY" -eq 1 ]; then
   "$PYTHON_BIN" "$ROOT/scripts/compute_complexity.py" \
     "${variant_catalogs[@]}" \
     --out-dir "$OUT_DIR/complexity" \
-    --knot-filter "$COMPLEXITY_FILTER"
+    --knot-filter "$COMPLEXITY_FILTER" \
+    --pca-orientation "$PCA_ORIENTATION"
 
   if [ "$MODE" = "multi" ] && [ "$COMPLEXITY_PER_VARIANT" -eq 1 ]; then
     echo "running per-variant PCA complexity pass"
@@ -530,6 +543,7 @@ elif [ "$RUN_COMPLEXITY" -eq 1 ]; then
       "${variant_catalogs[@]}" \
       --out-dir "$OUT_DIR/complexity/per_variant" \
       --knot-filter "$COMPLEXITY_FILTER" \
+      --pca-orientation "$PCA_ORIENTATION" \
       --per-variant
 
     echo "per-variant:   $OUT_DIR/complexity/per_variant"

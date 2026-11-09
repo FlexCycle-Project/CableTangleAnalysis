@@ -222,6 +222,7 @@ def select_training_groups(
 def fit_pca(
     training_groups: list[dict[str, Any]],
     features: list[str],
+    orientation_mode: str = "positive",
 ) -> dict[str, Any]:
     if len(training_groups) < 2:
         raise SystemExit("error: PCA needs at least two catalog rows")
@@ -237,52 +238,70 @@ def fit_pca(
     total_variance = float(variances.sum())
     explained = variances / total_variance if total_variance > 0.0 else np.zeros_like(variances)
 
-    loadings = vt[0].copy()
+    signed_loadings = vt[0].copy()
     orientation = "sum-positive"
-    if loadings.sum() < 0.0:
-        loadings *= -1.0
-    elif abs(float(loadings.sum())) <= 1e-12:
-        first_nonzero = next((i for i, value in enumerate(loadings) if abs(value) > 1e-12), None)
-        if first_nonzero is not None and loadings[first_nonzero] < 0.0:
-            loadings *= -1.0
+    if signed_loadings.sum() < 0.0:
+        signed_loadings *= -1.0
+    elif abs(float(signed_loadings.sum())) <= 1e-12:
+        first_nonzero = next(
+            (i for i, value in enumerate(signed_loadings) if abs(value) > 1e-12),
+            None,
+        )
+        if first_nonzero is not None and signed_loadings[first_nonzero] < 0.0:
+            signed_loadings *= -1.0
         orientation = "first-nonzero-positive"
+
+    if orientation_mode == "signed":
+        weights = signed_loadings.copy()
+        score_formula = "pca_pc1_signed"
+    else:
+        # Domain convention: higher values of all five metrics mean a more
+        # complex tangle. Use absolute PC1 loadings so every metric contributes
+        # in the positive complexity direction.
+        weights = np.abs(signed_loadings)
+        score_formula = "weighted_sum_abs_pc1_loadings"
 
     return {
         "features": features,
         "mean": mean,
         "std": std,
-        "loadings": loadings,
+        "signed_loadings": signed_loadings,
+        "weights": weights,
         "explained": explained,
         "orientation": orientation,
+        "orientation_mode": orientation_mode,
+        "score_formula": score_formula,
     }
 
 
 def score_groups(groups: list[dict[str, Any]], model: dict[str, Any]) -> list[dict[str, Any]]:
     x = np.asarray([group["values"] for group in groups], dtype=float)
     z = (x - model["mean"]) / model["std"]
-    pc1 = z @ model["loadings"]
+    pc1_signed = z @ model["signed_loadings"]
+    raw = z @ model["weights"]
 
-    minimum = float(pc1.min())
-    maximum = float(pc1.max())
+    minimum = float(raw.min())
+    maximum = float(raw.max())
     if maximum > minimum:
-        normalized = (pc1 - minimum) / (maximum - minimum)
+        normalized = (raw - minimum) / (maximum - minimum)
     else:
-        normalized = np.zeros_like(pc1)
+        normalized = np.zeros_like(raw)
 
-    order = np.argsort(pc1)
+    order = np.argsort(raw)
     ranks = np.empty_like(order)
-    ranks[order] = np.arange(len(pc1), dtype=float)
-    if len(pc1) > 1:
-        percentile = ranks / float(len(pc1) - 1)
+    ranks[order] = np.arange(len(raw), dtype=float)
+    if len(raw) > 1:
+        percentile = ranks / float(len(raw) - 1)
     else:
-        percentile = np.zeros_like(pc1)
+        percentile = np.zeros_like(raw)
 
     scored: list[dict[str, Any]] = []
     for index, group in enumerate(groups):
         scored.append(
             {
                 **group,
-                "pc1": float(pc1[index]),
+                "pc1_signed": float(pc1_signed[index]),
+                "pc1": float(raw[index]),
                 "score": float(normalized[index]),
                 "percentile": float(percentile[index]),
             }
@@ -303,18 +322,27 @@ def write_model(
     filter_used: str,
 ) -> None:
     rows = []
-    for name, mean, std, loading in zip(
-        model["features"], model["mean"], model["std"], model["loadings"]
+    for name, mean, std, weight, signed in zip(
+        model["features"],
+        model["mean"],
+        model["std"],
+        model["weights"],
+        model["signed_loadings"],
     ):
         rows.append(
             {
                 "feature": name,
                 "mean": fmt(float(mean)),
                 "std": fmt(float(std)),
-                "pc1_loading": fmt(float(loading)),
+                "pc1_loading": fmt(float(weight)),
+                "pc1_loading_signed": fmt(float(signed)),
             }
         )
-    write_tsv(out_dir / "complexity_model.tsv", rows, ["feature", "mean", "std", "pc1_loading"])
+    write_tsv(
+        out_dir / "complexity_model.tsv",
+        rows,
+        ["feature", "mean", "std", "pc1_loading", "pc1_loading_signed"],
+    )
 
     summary = [
         f"features={','.join(model['features'])}",
@@ -324,7 +352,8 @@ def write_model(
         f"scored_rows={total_rows}",
         f"pc1_explained_variance={fmt(float(model['explained'][0]))}",
         f"orientation={model['orientation']}",
-        "score=pca_pc1(standardized_features)",
+        f"orientation_mode={model['orientation_mode']}",
+        f"score={model['score_formula']}",
     ]
     (out_dir / "complexity_summary.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
 
@@ -335,6 +364,7 @@ def write_scores(out_dir: Path, scored: list[dict[str, Any]], features: list[str
         "seed",
         "knotType",
         "complexity_pc1",
+        "complexity_pc1_signed",
         "complexity_score",
         "complexity_percentile",
         *features,
@@ -347,6 +377,7 @@ def write_scores(out_dir: Path, scored: list[dict[str, Any]], features: list[str
                 "seed": item["seed"],
                 "knotType": "|".join(sorted(item["knot_types"])),
                 "complexity_pc1": fmt(item["pc1"]),
+                "complexity_pc1_signed": fmt(item["pc1_signed"]),
                 "complexity_score": fmt(item["score"]),
                 "complexity_percentile": fmt(item["percentile"]),
                 **{
@@ -368,7 +399,7 @@ def augment_catalog(
     destination = output_dir if output_dir is not None else catalog.parent
     output = destination / f"{catalog.stem}_with_complexity{catalog.suffix}"
     fieldnames = list(meta["fieldnames"])
-    for name in ("complexity_pc1", "complexity_score", "complexity_percentile"):
+    for name in ("complexity_pc1", "complexity_pc1_signed", "complexity_score", "complexity_percentile"):
         if name not in fieldnames:
             fieldnames.append(name)
 
@@ -378,6 +409,7 @@ def augment_catalog(
         score = scores.get((variant, seed))
         out_row = dict(row)
         out_row["complexity_pc1"] = fmt(score["pc1"]) if score else ""
+        out_row["complexity_pc1_signed"] = fmt(score["pc1_signed"]) if score else ""
         out_row["complexity_score"] = fmt(score["score"]) if score else ""
         out_row["complexity_percentile"] = fmt(score["percentile"]) if score else ""
         rows.append(out_row)
@@ -399,7 +431,7 @@ def augment_eval_file(
     if "seed" not in fieldnames:
         return None
 
-    for name in ("complexity_pc1", "complexity_score", "complexity_percentile"):
+    for name in ("complexity_pc1", "complexity_pc1_signed", "complexity_score", "complexity_percentile"):
         if name not in fieldnames:
             fieldnames.append(name)
 
@@ -409,6 +441,7 @@ def augment_eval_file(
         score = scores.get((variant, seed))
         out_row = dict(row)
         out_row["complexity_pc1"] = fmt(score["pc1"]) if score else ""
+        out_row["complexity_pc1_signed"] = fmt(score["pc1_signed"]) if score else ""
         out_row["complexity_score"] = fmt(score["score"]) if score else ""
         out_row["complexity_percentile"] = fmt(score["percentile"]) if score else ""
         output_rows.append(out_row)
@@ -511,6 +544,7 @@ def analyze(
     min_training_rows: int,
     no_eval_join: bool,
     augment_dir: Path | None = None,
+    orientation_mode: str = "positive",
 ) -> list[dict[str, str]]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -521,7 +555,7 @@ def analyze(
     training_groups, filter_used = select_training_groups(
         groups, knot_filter, min_training_rows
     )
-    model = fit_pca(training_groups, features)
+    model = fit_pca(training_groups, features, orientation_mode)
     scored = score_groups(groups, model)
     scores = score_map(scored)
 
@@ -614,7 +648,7 @@ def analyze(
     print(f"PCA rows: {len(training_groups)} of {len(groups)}")
     print(f"PC1 explained variance: {model['explained'][0] * 100.0:.2f}%")
     print("PC1 weights:")
-    for name, loading in zip(features, model["loadings"]):
+    for name, loading in zip(features, model["weights"]):
         print(f"  {name}: {loading:.6f}")
     print(f"Wrote complexity outputs to: {out_dir}")
 
@@ -630,6 +664,15 @@ def main() -> None:
         nargs="+",
         default=DEFAULT_FEATURES,
         help="PCA feature columns (default: non-threading geometry metrics)",
+    )
+    parser.add_argument(
+        "--pca-orientation",
+        choices=["positive", "signed"],
+        default="positive",
+        help=(
+            "positive: use absolute PC1 loadings so every metric increases "
+            "complexity (default); signed: keep the signed PC1 projection"
+        ),
     )
     parser.add_argument(
         "--knot-filter",
@@ -670,6 +713,7 @@ def main() -> None:
                 args.min_training_rows,
                 args.no_eval_join,
                 augment_dir=variant_out,
+                orientation_mode=args.pca_orientation,
             )
             for row in rows:
                 manifest_rows.append(
@@ -705,6 +749,7 @@ def main() -> None:
             args.knot_filter,
             args.min_training_rows,
             args.no_eval_join,
+            orientation_mode=args.pca_orientation,
         )
 
 
