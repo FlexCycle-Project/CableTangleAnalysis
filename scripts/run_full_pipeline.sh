@@ -288,10 +288,31 @@ XVFB_LOG="$OUT_DIR/xvfb.log"
 Xvfb ":$DISPLAY_NUM" -screen 0 1280x1024x24 > "$XVFB_LOG" 2>&1 &
 XVFB_PID=$!
 
+WORKER_PIDS=()
+
+# Kill a process and all of its descendants.  KymoKnot is started through
+# std::system(), so it is a grandchild of each worker shell.  Killing only the
+# worker would leave KymoKnot running as an orphan.
+kill_tree() {
+  local pid="$1"
+  local signal="${2:-TERM}"
+  local child
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    kill_tree "$child" "$signal"
+  done
+  kill "-$signal" "$pid" 2>/dev/null || true
+}
+
 cleanup() {
+  local pid
+  for pid in "${WORKER_PIDS[@]:-}"; do
+    kill_tree "$pid"
+  done
   kill "$XVFB_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for _ in $(seq 1 50); do
   [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] && break
@@ -423,6 +444,7 @@ run_variant() {
   local remainder=$((TOTAL % WORKERS))
   local next_seed="$START_SEED"
   local pids=()
+  WORKER_PIDS=()
 
   for worker in $(seq 1 "$WORKERS"); do
     local count="$base"
@@ -435,6 +457,7 @@ run_variant() {
 
     run_worker "$worker" "$first_seed" "$last_seed" "$variant_out" "$creep" &
     pids+=("$!")
+    WORKER_PIDS+=("$!")
   done
 
   local failed=0
@@ -443,6 +466,7 @@ run_variant() {
       failed=1
     fi
   done
+  WORKER_PIDS=()
 
   if [ "$failed" -ne 0 ]; then
     echo "error: at least one worker failed; see $variant_out/logs" >&2
