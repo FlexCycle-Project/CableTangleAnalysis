@@ -289,6 +289,53 @@ Xvfb ":$DISPLAY_NUM" -screen 0 1280x1024x24 > "$XVFB_LOG" 2>&1 &
 XVFB_PID=$!
 
 WORKER_PIDS=()
+PROGRESS_PID=""
+
+# Show completed seed phases (catalog + cut evaluation + cuts-to-zero) by
+# counting the flush-per-sample progress lines in the worker logs.
+progress_monitor() {
+  local log_dir="$1"
+  local total_units="$2"
+  local label="$3"
+  local last_percent=-1
+  local logs=()
+
+  while true; do
+    shopt -s nullglob
+    logs=("$log_dir"/worker_*.log)
+    shopt -u nullglob
+
+    local done=0
+    if [ "${#logs[@]}" -gt 0 ]; then
+      done=$(awk '
+        /\[knot-catalog\] wrote/ { c++ }
+        /\[cut-eval\] seed=/ { e++ }
+        /\[cuts-to-zero\] seed=/ { z++ }
+        END { print c + e + z + 0 }
+      ' "${logs[@]}" 2>/dev/null || echo 0)
+    fi
+
+    local percent=$((done * 100 / total_units))
+    [ "$percent" -gt 100 ] && percent=100
+
+    if [ -t 1 ]; then
+      local filled=$((percent * 30 / 100))
+      local empty=$((30 - filled))
+      local bar
+      bar="$(printf '%*s' "$filled" '' | tr ' ' '#')"
+      bar="${bar}$(printf '%*s' "$empty" '' | tr ' ' '.')"
+      printf '\r[%s] [%s] %3d%% (%d/%d)' \
+        "$label" "$bar" "$percent" "$done" "$total_units"
+    elif [ "$percent" -ne "$last_percent" ] && \
+         { [ "$last_percent" -lt 0 ] || [ $((percent - last_percent)) -ge 5 ]; }; then
+      printf '[%s] %3d%% (%d/%d)\n' \
+        "$label" "$percent" "$done" "$total_units"
+    fi
+
+    last_percent="$percent"
+    sleep 2
+  done
+}
 
 # Kill a process and all of its descendants.  KymoKnot is started through
 # std::system(), so it is a grandchild of each worker shell.  Killing only the
@@ -305,6 +352,9 @@ kill_tree() {
 
 cleanup() {
   local pid
+  if [ -n "${PROGRESS_PID:-}" ]; then
+    kill "$PROGRESS_PID" 2>/dev/null || true
+  fi
   for pid in "${WORKER_PIDS[@]:-}"; do
     kill_tree "$pid"
   done
@@ -460,13 +510,32 @@ run_variant() {
     WORKER_PIDS+=("$!")
   done
 
+  local total_units=$((TOTAL * 3))
+  progress_monitor "$variant_out/logs" "$total_units" "$label" &
+  PROGRESS_PID=$!
+
   local failed=0
   for pid in "${pids[@]}"; do
     if ! wait "$pid"; then
       failed=1
     fi
   done
+
+  if [ -n "${PROGRESS_PID:-}" ]; then
+    kill "$PROGRESS_PID" 2>/dev/null || true
+    wait "$PROGRESS_PID" 2>/dev/null || true
+    PROGRESS_PID=""
+  fi
   WORKER_PIDS=()
+
+  if [ "$failed" -eq 0 ]; then
+    if [ -t 1 ]; then
+      printf '\r[%s] [##############################] 100%% (%d/%d)\n' \
+        "$label" "$total_units" "$total_units"
+    else
+      printf '[%s] 100%% (%d/%d)\n' "$label" "$total_units" "$total_units"
+    fi
+  fi
 
   if [ "$failed" -ne 0 ]; then
     echo "error: at least one worker failed; see $variant_out/logs" >&2
