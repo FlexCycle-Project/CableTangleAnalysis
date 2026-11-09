@@ -681,17 +681,13 @@ void applyPullForces(
     }
 }
 
-std::vector<SelfCollisionContact> detectSelfCollisionContacts(
-    SimulationModel* model,
+static std::vector<SelfCollisionContact> detectSelfCollisionContactsFromParticles(
+    const ParticleData& pd,
     const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg)
 {
     std::vector<SelfCollisionContact> contacts;
-    if (model == nullptr)
-        return contacts;
-
-    ParticleData& pd = model->getParticles();
     const unsigned int n = pd.getNumberOfParticles();
     if (n < 4)
         return contacts;
@@ -748,6 +744,42 @@ std::vector<SelfCollisionContact> detectSelfCollisionContacts(
     }
 
     return contacts;
+}
+
+std::vector<SelfCollisionContact> detectSelfCollisionContacts(
+    SimulationModel* model,
+    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg)
+{
+    if (model == nullptr)
+        return {};
+    return detectSelfCollisionContactsFromParticles(
+        model->getParticles(), pieceRanges, ropeCfg, collisionCfg);
+}
+
+std::vector<SelfCollisionContact> detectSelfCollisionContactsForPieces(
+    const std::vector<std::vector<Vector3r>>& pieces,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg)
+{
+    ParticleData pd;
+    std::vector<std::pair<unsigned int, unsigned int>> pieceRanges;
+
+    for (const std::vector<Vector3r>& piece : pieces)
+    {
+        if (piece.size() < 2)
+            continue;
+
+        const unsigned int start = pd.getNumberOfParticles();
+        for (const Vector3r& point : piece)
+            pd.addVertex(point);
+        pieceRanges.push_back(
+            { start, start + static_cast<unsigned int>(piece.size()) - 1 });
+    }
+
+    return detectSelfCollisionContactsFromParticles(
+        pd, pieceRanges, ropeCfg, collisionCfg);
 }
 
 void applySelfCollision(

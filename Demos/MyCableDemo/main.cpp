@@ -135,6 +135,8 @@ static unsigned int g_evalRandomTrials = 10;
 static bool g_evalOracleEnabled = false;
 static bool g_evalCutsToZeroEnabled = false;
 static std::string g_evalCutsToZeroOutputPath;
+static std::string g_evalStageMetricsOutputPath;
+static std::string g_evalCutsToZeroStageMetricsOutputPath;
 static unsigned int g_evalCutsToZeroMaxCuts = 10;
 static unsigned int g_evalCutsToZeroRandomTrials = 20;
 static size_t g_evalCurrentIndex = 0;
@@ -252,6 +254,18 @@ static std::string resolveDefaultCutsToZeroEvalOutputPath()
     return catalogPath.substr(0, slashPos + 1) + "knot_cuts_to_zero.tsv";
 }
 
+static std::string deriveStageMetricsPath(const std::string& evalPath)
+{
+    const size_t slashPos = evalPath.find_last_of("\\/");
+    const size_t dotPos = evalPath.find_last_of('.');
+    if (dotPos == std::string::npos ||
+        (slashPos != std::string::npos && dotPos < slashPos))
+    {
+        return evalPath + "_stage_metrics.tsv";
+    }
+    return evalPath.substr(0, dotPos) + "_stage_metrics.tsv";
+}
+
 static std::vector<std::string> splitTabSeparatedLine(const std::string& line)
 {
     std::vector<std::string> fields;
@@ -332,6 +346,27 @@ static bool loadCutEvalCatalog()
     return !g_evalSeeds.empty();
 }
 
+static bool prepareStageMetricsOutputFile(
+    std::string& path,
+    const std::string& fallbackPath)
+{
+    if (path.empty())
+        path = deriveStageMetricsPath(fallbackPath);
+
+    std::ofstream out(path, std::ios::trunc);
+    if (!out)
+    {
+        std::cout << "[stage-metrics] could not open output file "
+                  << path << std::endl;
+        return false;
+    }
+
+    out << "seed\tknotType\tstrategy\ttrial\tstage\tcuts\tthreading\tresolved"
+        << "\tpieceCount\tpointCount\tsegmentCount\tselfCollisionCount"
+        << "\tclosePairCount\ttotalCurvature\toutsideKnotCurvature\n";
+    return true;
+}
+
 static bool prepareCutEvalOutputFile()
 {
     if (g_evalOutputPath.empty())
@@ -352,7 +387,10 @@ static bool prepareCutEvalOutputFile()
         << "\tdelta_smallest_hoop\tsmallest_hoop_span\tsmallest_hoop_score"
         << "\tdelta_max_curvature\tmax_curvature"
         << "\tdelta_oracle\toracle_evaluated\toracle_piece_index\toracle_edge_index\n";
-    return true;
+
+    return prepareStageMetricsOutputFile(
+        g_evalStageMetricsOutputPath,
+        g_evalOutputPath);
 }
 
 static bool prepareCutsToZeroEvalOutputFile()
@@ -374,7 +412,10 @@ static bool prepareCutsToZeroEvalOutputFile()
         << "\tbiggest_hoop_cuts\tbiggest_hoop_resolved\thoop_count"
         << "\tsmallest_hoop_cuts\tsmallest_hoop_resolved"
         << "\tmax_curvature_cuts\tmax_curvature_resolved\n";
-    return true;
+
+    return prepareStageMetricsOutputFile(
+        g_evalCutsToZeroStageMetricsOutputPath,
+        g_evalCutsToZeroOutputPath);
 }
 
 static bool loadKnotSeedPresetFile()
@@ -854,6 +895,145 @@ static void appendCatalogRows(
               << " to " << g_knotSeedCatalogPath << std::endl;
 }
 
+struct CutStageLogContext
+{
+    std::string eval;
+    unsigned int seed = 0;
+    std::string knotType;
+    std::string strategy;
+    unsigned int trial = 0;
+    bool enabled = false;
+};
+
+struct CutStageMetrics
+{
+    int threading = 0;
+    bool resolved = false;
+    size_t pieceCount = 0;
+    size_t pointCount = 0;
+    size_t segmentCount = 0;
+    size_t selfCollisionCount = 0;
+    size_t closePairCount = 0;
+    Real totalCurvature = static_cast<Real>(0.0);
+    Real outsideKnotCurvature = static_cast<Real>(0.0);
+};
+
+static CutStageMetrics computeCutStageMetrics(
+    const std::vector<std::vector<Vector3r>>& ropePieces)
+{
+    CutStageMetrics stage;
+    const std::vector<SelfCollisionContact> contacts =
+        detectSelfCollisionContactsForPieces(
+            ropePieces,
+            g_cfg.rope,
+            g_cfg.selfCollision);
+    const TanglementAnalyzer::TanglementAnalysisResult tanglement =
+        TanglementAnalyzer::analyzeTanglement(
+            ropePieces,
+            contacts,
+            g_cfg.rope,
+            g_cfg.selfCollision,
+            g_kymoKnotSearchMode);
+    const TanglementAnalyzer::TanglementMetricsSnapshot& metrics = tanglement.metrics;
+
+    stage.threading =
+        TanglementAnalyzer::computeThreadingMetrics(tanglement).totalThreadingCount;
+    stage.resolved = stage.threading == 0;
+    stage.pieceCount = metrics.pieceCount;
+    stage.pointCount = metrics.totalPointCount;
+    stage.segmentCount = metrics.totalSegmentCount;
+    stage.selfCollisionCount = contacts.size();
+    stage.closePairCount = metrics.closePairCount;
+
+    Real totalCurvature = static_cast<Real>(0.0);
+    for (const std::vector<Vector3r>& piece : ropePieces)
+        totalCurvature += computeTotalCurvature(piece);
+    stage.totalCurvature = totalCurvature;
+
+    Real outsideKnotCurvature = totalCurvature;
+    for (size_t pieceIndex = 0; pieceIndex < tanglement.kymoResults.size(); ++pieceIndex)
+    {
+        if (pieceIndex >= ropePieces.size())
+            continue;
+
+        const PBD::KymoKnotAnalysisResult& knotResult = tanglement.kymoResults[pieceIndex];
+        if (!knotResult.available || !knotResult.success || knotResult.segments.empty())
+            continue;
+
+        bool hasNontrivialKnot = false;
+        for (const PBD::KymoKnotSegment& segment : knotResult.segments)
+        {
+            if (isNontrivialKnotType(segment.knotType))
+            {
+                hasNontrivialKnot = true;
+                break;
+            }
+        }
+        if (!hasNontrivialKnot)
+            continue;
+
+        outsideKnotCurvature = computeCurvatureOutsideKnotRegions(
+            ropePieces[pieceIndex],
+            knotResult,
+            nullptr);
+    }
+    stage.outsideKnotCurvature = outsideKnotCurvature;
+
+    return stage;
+}
+
+static void appendCutStageMetricsRow(
+    const CutStageLogContext& context,
+    unsigned int stage,
+    unsigned int cuts,
+    const CutStageMetrics& metrics)
+{
+    const std::string& path = context.eval == "cuts_to_zero"
+        ? g_evalCutsToZeroStageMetricsOutputPath
+        : g_evalStageMetricsOutputPath;
+    if (!context.enabled || path.empty())
+        return;
+
+    std::ofstream out(path, std::ios::app);
+    if (!out)
+    {
+        std::cout << "[stage-metrics] could not append to " << path << std::endl;
+        return;
+    }
+
+    out << std::fixed << std::setprecision(6)
+        << context.seed << '\t'
+        << context.knotType << '\t'
+        << context.strategy << '\t'
+        << context.trial << '\t'
+        << stage << '\t'
+        << cuts << '\t'
+        << metrics.threading << '\t'
+        << (metrics.resolved ? 1 : 0) << '\t'
+        << metrics.pieceCount << '\t'
+        << metrics.pointCount << '\t'
+        << metrics.segmentCount << '\t'
+        << metrics.selfCollisionCount << '\t'
+        << metrics.closePairCount << '\t'
+        << metrics.totalCurvature << '\t'
+        << metrics.outsideKnotCurvature << '\n';
+}
+
+static void recordCutStage(
+    const CutStageLogContext& context,
+    unsigned int stage,
+    unsigned int cuts,
+    const std::vector<std::vector<Vector3r>>& ropePieces)
+{
+    if (!context.enabled)
+        return;
+    appendCutStageMetricsRow(
+        context,
+        stage,
+        cuts,
+        computeCutStageMetrics(ropePieces));
+}
+
 static void evaluateCurrentCableTanglement(bool saveSeedPreset)
 {
     SimulationModel* model = Simulation::getCurrent()->getModel();
@@ -1187,6 +1367,29 @@ namespace
         return beforeThreading - afterThreading;
     }
 
+    static int computeAndRecordVirtualCutDeltaThreading(
+        const std::vector<std::vector<Vector3r>>& ropePieces,
+        int beforeThreading,
+        const VirtualCutTarget& target,
+        const CutStageLogContext& context)
+    {
+        if (!target.valid)
+            return 0;
+
+        std::vector<std::vector<Vector3r>> splitPieces = ropePieces;
+        if (!splitCablePieceAtEdge(
+                splitPieces,
+                target.pieceIndex,
+                target.edgeIndex))
+        {
+            return 0;
+        }
+
+        const int afterThreading = computeThreadingCountGeometryOnly(splitPieces);
+        recordCutStage(context, 1, 1, splitPieces);
+        return beforeThreading - afterThreading;
+    }
+
     struct SingleCutOracleResult
     {
         VirtualCutTarget target;
@@ -1230,7 +1433,8 @@ namespace
 
     static CutsToZeroOutcome runHeuristicCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
-        unsigned int maxCuts)
+        unsigned int maxCuts,
+        const CutStageLogContext& stageContext)
     {
         std::vector<std::vector<Vector3r>> pieces = startPieces;
         CutsToZeroOutcome outcome;
@@ -1256,6 +1460,7 @@ namespace
                 break;
 
             ++outcome.cuts;
+            recordCutStage(stageContext, outcome.cuts, outcome.cuts, pieces);
         }
 
         outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
@@ -1266,7 +1471,8 @@ namespace
 
     static CutsToZeroOutcome runBiggestHoopCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
-        unsigned int maxCuts)
+        unsigned int maxCuts,
+        const CutStageLogContext& stageContext)
     {
         std::vector<std::vector<Vector3r>> pieces = startPieces;
         CutsToZeroOutcome outcome;
@@ -1292,6 +1498,7 @@ namespace
                 break;
 
             ++outcome.cuts;
+            recordCutStage(stageContext, outcome.cuts, outcome.cuts, pieces);
         }
 
         outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
@@ -1302,7 +1509,8 @@ namespace
 
     static CutsToZeroOutcome runSmallestHoopCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
-        unsigned int maxCuts)
+        unsigned int maxCuts,
+        const CutStageLogContext& stageContext)
     {
         std::vector<std::vector<Vector3r>> pieces = startPieces;
         CutsToZeroOutcome outcome;
@@ -1328,6 +1536,7 @@ namespace
                 break;
 
             ++outcome.cuts;
+            recordCutStage(stageContext, outcome.cuts, outcome.cuts, pieces);
         }
 
         outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
@@ -1338,7 +1547,8 @@ namespace
 
     static CutsToZeroOutcome runMaxCurvatureCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
-        unsigned int maxCuts)
+        unsigned int maxCuts,
+        const CutStageLogContext& stageContext)
     {
         std::vector<std::vector<Vector3r>> pieces = startPieces;
         CutsToZeroOutcome outcome;
@@ -1359,6 +1569,7 @@ namespace
                 break;
 
             ++outcome.cuts;
+            recordCutStage(stageContext, outcome.cuts, outcome.cuts, pieces);
         }
 
         outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
@@ -1370,7 +1581,8 @@ namespace
     static CutsToZeroOutcome runRandomHoopCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
         unsigned int maxCuts,
-        std::mt19937& rng)
+        std::mt19937& rng,
+        const CutStageLogContext& stageContext)
     {
         std::vector<std::vector<Vector3r>> pieces = startPieces;
         CutsToZeroOutcome outcome;
@@ -1399,6 +1611,7 @@ namespace
             }
 
             ++outcome.cuts;
+            recordCutStage(stageContext, outcome.cuts, outcome.cuts, pieces);
         }
 
         outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
@@ -1410,7 +1623,8 @@ namespace
     static CutsToZeroOutcome runRandomCutsToZero(
         const std::vector<std::vector<Vector3r>>& startPieces,
         unsigned int maxCuts,
-        std::mt19937& rng)
+        std::mt19937& rng,
+        const CutStageLogContext& stageContext)
     {
         std::vector<std::vector<Vector3r>> pieces = startPieces;
         CutsToZeroOutcome outcome;
@@ -1435,6 +1649,7 @@ namespace
                 break;
 
             ++outcome.cuts;
+            recordCutStage(stageContext, outcome.cuts, outcome.cuts, pieces);
         }
 
         outcome.resolved = computeThreadingCountGeometryOnly(pieces) == 0;
@@ -1468,6 +1683,21 @@ static void evaluateAndRecordCutHeuristicSample()
         collectHoopCutTargets(tanglement, ropePieces);
     const int hoopCount = static_cast<int>(hoopTargets.size());
 
+    auto makeStageContext = [&](const std::string& strategy, unsigned int trial)
+    {
+        CutStageLogContext context;
+        context.eval = "cut_eval";
+        context.seed = record.seed;
+        context.knotType = record.knotType;
+        context.strategy = strategy;
+        context.trial = trial;
+        context.enabled = !g_evalStageMetricsOutputPath.empty();
+        return context;
+    };
+
+    if (!g_evalStageMetricsOutputPath.empty())
+        recordCutStage(makeStageContext("initial", 0), 0, 0, ropePieces);
+
     int skipped = 0;
     int heuristicDelta = 0;
     int heuristicHoopScore = 0;
@@ -1477,10 +1707,11 @@ static void evaluateAndRecordCutHeuristicSample()
         if (heuristicTarget.valid)
         {
             heuristicHoopScore = heuristicTarget.hoopScore;
-            heuristicDelta = computeVirtualCutDeltaThreading(
+            heuristicDelta = computeAndRecordVirtualCutDeltaThreading(
                 ropePieces,
                 beforeThreading,
-                heuristicTarget);
+                heuristicTarget,
+                makeStageContext("heuristic", 0));
         }
         else
         {
@@ -1497,10 +1728,11 @@ static void evaluateAndRecordCutHeuristicSample()
             findBiggestHoopMidpointCut(tanglement, ropePieces);
         if (biggestTarget.valid)
         {
-            biggestHoopDelta = computeVirtualCutDeltaThreading(
+            biggestHoopDelta = computeAndRecordVirtualCutDeltaThreading(
                 ropePieces,
                 beforeThreading,
-                biggestTarget);
+                biggestTarget,
+                makeStageContext("biggest_hoop", 0));
             biggestHoopSpan = biggestTarget.hoopSpan;
             biggestHoopScore = biggestTarget.hoopScore;
         }
@@ -1515,10 +1747,11 @@ static void evaluateAndRecordCutHeuristicSample()
             findSmallestHoopMidpointCut(tanglement, ropePieces);
         if (smallestTarget.valid)
         {
-            smallestHoopDelta = computeVirtualCutDeltaThreading(
+            smallestHoopDelta = computeAndRecordVirtualCutDeltaThreading(
                 ropePieces,
                 beforeThreading,
-                smallestTarget);
+                smallestTarget,
+                makeStageContext("smallest_hoop", 0));
             smallestHoopSpan = smallestTarget.hoopSpan;
             smallestHoopScore = smallestTarget.hoopScore;
         }
@@ -1533,10 +1766,11 @@ static void evaluateAndRecordCutHeuristicSample()
             g_cfg.selfCollision.excludeArcLength);
         if (curvatureTarget.valid)
         {
-            maxCurvatureDelta = computeVirtualCutDeltaThreading(
+            maxCurvatureDelta = computeAndRecordVirtualCutDeltaThreading(
                 ropePieces,
                 beforeThreading,
-                curvatureTarget);
+                curvatureTarget,
+                makeStageContext("max_curvature", 0));
             maxCurvature = curvatureTarget.curvature;
         }
     }
@@ -1548,6 +1782,14 @@ static void evaluateAndRecordCutHeuristicSample()
             ropePieces,
             beforeThreading,
             g_cfg.selfCollision.excludeArcLength);
+        if (oracle.target.valid)
+        {
+            computeAndRecordVirtualCutDeltaThreading(
+                ropePieces,
+                beforeThreading,
+                oracle.target,
+                makeStageContext("oracle", 0));
+        }
     }
 
     Real randomMean = static_cast<Real>(0.0);
@@ -1566,10 +1808,11 @@ static void evaluateAndRecordCutHeuristicSample()
             for (unsigned int trial = 0; trial < g_evalRandomTrials; ++trial)
             {
                 const VirtualCutTarget& randomTarget = randomTargets[dist(rng)];
-                const int delta = computeVirtualCutDeltaThreading(
+                const int delta = computeAndRecordVirtualCutDeltaThreading(
                     ropePieces,
                     beforeThreading,
-                    randomTarget);
+                    randomTarget,
+                    makeStageContext("random_edge", trial + 1));
                 randomDeltas.push_back(static_cast<Real>(delta));
                 randomMean += static_cast<Real>(delta);
             }
@@ -1598,10 +1841,11 @@ static void evaluateAndRecordCutHeuristicSample()
         for (unsigned int trial = 0; trial < g_evalRandomTrials; ++trial)
         {
             const VirtualCutTarget& randomHoopTarget = hoopTargets[dist(rng)];
-            const int delta = computeVirtualCutDeltaThreading(
+            const int delta = computeAndRecordVirtualCutDeltaThreading(
                 ropePieces,
                 beforeThreading,
-                randomHoopTarget);
+                randomHoopTarget,
+                makeStageContext("random_hoop", trial + 1));
             randomHoopDeltas.push_back(static_cast<Real>(delta));
             randomHoopMean += static_cast<Real>(delta);
         }
@@ -1688,6 +1932,21 @@ static void evaluateAndRecordCutsToZeroSample()
     const int hoopCount =
         static_cast<int>(collectHoopCutTargets(initialTanglement, ropePieces).size());
 
+    auto makeStageContext = [&](const std::string& strategy, unsigned int trial)
+    {
+        CutStageLogContext context;
+        context.eval = "cuts_to_zero";
+        context.seed = record.seed;
+        context.knotType = record.knotType;
+        context.strategy = strategy;
+        context.trial = trial;
+        context.enabled = !g_evalCutsToZeroStageMetricsOutputPath.empty();
+        return context;
+    };
+
+    if (!g_evalCutsToZeroStageMetricsOutputPath.empty())
+        recordCutStage(makeStageContext("initial", 0), 0, 0, ropePieces);
+
     CutsToZeroOutcome heuristicOutcome;
     CutsToZeroOutcome biggestHoopOutcome;
     CutsToZeroOutcome smallestHoopOutcome;
@@ -1710,16 +1969,20 @@ static void evaluateAndRecordCutsToZeroSample()
     {
         heuristicOutcome = runHeuristicCutsToZero(
             ropePieces,
-            g_evalCutsToZeroMaxCuts);
+            g_evalCutsToZeroMaxCuts,
+            makeStageContext("heuristic", 0));
         biggestHoopOutcome = runBiggestHoopCutsToZero(
             ropePieces,
-            g_evalCutsToZeroMaxCuts);
+            g_evalCutsToZeroMaxCuts,
+            makeStageContext("biggest_hoop", 0));
         smallestHoopOutcome = runSmallestHoopCutsToZero(
             ropePieces,
-            g_evalCutsToZeroMaxCuts);
+            g_evalCutsToZeroMaxCuts,
+            makeStageContext("smallest_hoop", 0));
         maxCurvatureOutcome = runMaxCurvatureCutsToZero(
             ropePieces,
-            g_evalCutsToZeroMaxCuts);
+            g_evalCutsToZeroMaxCuts,
+            makeStageContext("max_curvature", 0));
 
         randomResolvedRate = static_cast<Real>(0.0);
         std::mt19937 edgeRng(record.seed ^ 0x9E3779B9u);
@@ -1732,7 +1995,8 @@ static void evaluateAndRecordCutsToZeroSample()
                 runRandomCutsToZero(
                     ropePieces,
                     g_evalCutsToZeroMaxCuts,
-                    edgeRng);
+                    edgeRng,
+                    makeStageContext("random_edge", trial + 1));
             randomCuts.push_back(static_cast<Real>(randomOutcome.cuts));
             randomMean += static_cast<Real>(randomOutcome.cuts);
             if (randomOutcome.resolved)
@@ -1764,7 +2028,8 @@ static void evaluateAndRecordCutsToZeroSample()
                 runRandomHoopCutsToZero(
                     ropePieces,
                     g_evalCutsToZeroMaxCuts,
-                    hoopRng);
+                    hoopRng,
+                    makeStageContext("random_hoop", trial + 1));
             randomHoopCuts.push_back(static_cast<Real>(randomHoopOutcome.cuts));
             randomHoopMean += static_cast<Real>(randomHoopOutcome.cuts);
             if (randomHoopOutcome.resolved)
@@ -1982,9 +2247,19 @@ int main(int argc, char** argv)
         {
             g_evalOutputPath = arg.substr(14);
         }
+        else if (arg.rfind("--eval-stage-metrics-output=", 0) == 0)
+        {
+            g_evalStageMetricsOutputPath =
+                arg.substr(std::string("--eval-stage-metrics-output=").size());
+        }
         else if (arg.rfind("--eval-ctz-output=", 0) == 0)
         {
             g_evalCutsToZeroOutputPath = arg.substr(18);
+        }
+        else if (arg.rfind("--eval-ctz-stage-metrics-output=", 0) == 0)
+        {
+            g_evalCutsToZeroStageMetricsOutputPath =
+                arg.substr(std::string("--eval-ctz-stage-metrics-output=").size());
         }
         else if (arg.rfind("--eval-random-trials=", 0) == 0)
         {

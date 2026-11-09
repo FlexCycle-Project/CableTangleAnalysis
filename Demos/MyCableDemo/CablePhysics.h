@@ -162,6 +162,10 @@ std::vector<SelfCollisionContact> detectSelfCollisionContacts(
     const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
     const SelfCollisionConfig& collisionCfg);
+std::vector<SelfCollisionContact> detectSelfCollisionContactsForPieces(
+    const std::vector<std::vector<Vector3r>>& pieces,
+    const RopeConfig& ropeCfg,
+    const SelfCollisionConfig& collisionCfg);
 void applyBendTwistRestStateCreep(
     PBD::SimulationModel* model,
     const RestShapeCreepConfig& creepCfg,

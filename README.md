@@ -170,13 +170,13 @@ By default it generates three rest-state-creep variants:
 | `current/` | 0.02 |
 | `high/` | 0.2 |
 
-Each variant contains `catalog.tsv`, `cut_eval.tsv`, `cuts_to_zero.tsv`, a `summary.txt`, and per-worker logs. A top-level `manifest.tsv` lists all variants. Use `--creep <value>` to run a single creep value instead (written directly to `--out`), or override the high/current values with `--creep-high` / `--creep-current`. Per-variant PCA and oracle analysis run in the three-variant mode.
+Each variant contains `catalog.tsv`, `cut_eval.tsv`, `cuts_to_zero.tsv`, `cut_eval_stage_metrics.tsv`, `cuts_to_zero_stage_metrics.tsv`, a `summary.txt`, and per-worker logs. The stage-metrics files contain the five complexity metrics for every tangle before and after each cut, so the PCA score can be recomputed for every stage independently. A top-level `manifest.tsv` lists all variants. Use `--creep <value>` to run a single creep value instead (written directly to `--out`), or override the high/current values with `--creep-high` / `--creep-current`. Per-variant complexity analysis runs for every variant; the pooled model and oracle analysis run in the three-variant mode.
 
 The script also sets `--creep-settle-steps=300` and lowers the creep activation threshold to `0.0001`. With the code default threshold (`0.01`), sustained mismatch under gravity-only settling stays below the threshold, so the creep variants would otherwise be identical. Override these with `--creep-settle-steps` and `--creep-threshold`.
 
 The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window. It runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds. Running all three creep variants takes roughly three times as long as a single variant.
 
-After the simulation stages it runs [`scripts/compute_complexity.py`](scripts/compute_complexity.py), which fits the PCA complexity model and joins the resulting score into the catalog and strategy outputs under `complexity/`. It then fits a separate PCA per creep variant under `complexity/per_variant/`. This requires Python 3 with NumPy. Pass `--no-complexity` to skip it, or `--no-complexity-per-variant` to skip only the per-variant pass.
+After the simulation stages it runs the Julia analysis in `cabletangleanalysis/`, which fits the PCA complexity model, scores every catalog row and every cut stage, and produces the cut-evaluation figures under `analysis_julia/<variant>/`. The pooled model is written to `complexity/`, and each creep variant gets its own model under `analysis_julia/<variant>/complexity/`. Set `JULIA_BIN` or `JULIA_PROJECT` if Julia is not on `PATH` or the project is elsewhere. Pass `--no-complexity` to skip the Julia pass, or `--no-complexity-per-variant` to fit only the pooled model.
 
 Finally, [`scripts/analyze_oracle.py`](scripts/analyze_oracle.py) analyses oracle single-cut performance against threading count and complexity score under `analysis_oracle/`. It requires Matplotlib; skip it with `--no-oracle-analysis`.
 
@@ -206,7 +206,7 @@ Cuts-to-zero appends:
 
 ### Complexity score
 
-The complexity score is computed after catalog generation by `scripts/compute_complexity.py`. It fits a PCA on five geometric metrics that do not directly determine the threading count:
+The complexity score is computed after catalog generation by the Julia module in `cabletangleanalysis/`. It fits a PCA on five geometric metrics that do not directly determine the threading count:
 
 ```text
 segmentCount
@@ -220,20 +220,25 @@ The first principal component is used as the metric weighting. By default (`--pc
 
 Use `--pca-orientation signed` to keep the exact signed PC1 projection instead. In that mode individual loadings may be negative because PC1 describes a trade-off direction.
 
-By default, PCA is fitted on rows identified by KymoKnot (`--complexity-filter identified`), excluding `none` and `??` rows. If fewer than three rows match, the script falls back to all rows and prints a warning. Other filters are `all`, `unidentified`, and `non-unknot`. When the pipeline runs multiple creep variants, all variants are pooled so the complexity score uses one common scale. The pipeline also fits a separate model per creep variant under `complexity/per_variant/<variant>/`, so each setting has its own weights and scores.
+By default, PCA is fitted on rows identified by KymoKnot (`--complexity-filter identified`), excluding `none` and `??` rows. If fewer than three rows match, the analysis falls back to all rows and prints a warning. Other filters are `all`, `unidentified`, and `non-unknot`. When the pipeline runs multiple creep variants, a pooled model is fitted across all variants, and a separate model is fitted per creep variant so each setting has its own weights and scores.
+
+`MyCableDemo` writes `cut_eval_stage_metrics.tsv` and `cuts_to_zero_stage_metrics.tsv` with the five complexity metrics for the initial tangle and for every cut stage. Julia applies the fitted model to those rows, so complexity reduction can be compared across strategies without recomputing the PCA during simulation.
 
 Outputs:
 
 | File | Contents |
 | --- | --- |
-| `complexity/complexity_model.tsv` | Feature means, standard deviations, oriented PC1 weight, and signed PC1 loading |
-| `complexity/complexity_summary.txt` | Training rows, filter, explained variance, orientation mode |
+| `complexity/complexity_model.tsv` | Pooled feature means, standard deviations, oriented PC1 weight, and signed PC1 loading |
+| `complexity/complexity_summary.txt` | Explained variance and orientation mode |
 | `complexity/complexity_scores.tsv` | Per-seed weighted score, signed PC1, normalized score, percentile, raw features |
+| `analysis_julia/<variant>/complexity/complexity_model.tsv` | Per-variant PCA model |
+| `analysis_julia/<variant>/complexity/cut_eval_stage_complexity.tsv` | Single-cut stage metrics with `delta_threading` and `delta_complexity` |
+| `analysis_julia/<variant>/complexity/cuts_to_zero_stage_complexity.tsv` | All cuts-to-zero stages with both deltas |
 | `<variant>/catalog_with_complexity.tsv` | Catalog with `complexity_pc1`, `complexity_pc1_signed`, `complexity_score`, `complexity_percentile` |
-| `<variant>/cut_eval_with_complexity.tsv` | Cut evaluation joined to the complexity score |
-| `<variant>/cuts_to_zero_with_complexity.tsv` | Cuts-to-zero evaluation joined to the complexity score |
-| `complexity/strategy_by_complexity.tsv` | Strategy means/medians by complexity quartile |
-| `complexity/strategy_correlations.tsv` | Pearson correlation between complexity and strategy metrics |
+| `<variant>/cut_eval_with_complexity.tsv` | Cut evaluation joined to the initial complexity score |
+| `<variant>/cuts_to_zero_with_complexity.tsv` | Cuts-to-zero evaluation joined to the initial complexity score |
+| `analysis_julia/<variant>/figures/cut_eval/cut_eval_comparison.pdf` | Single-cut comparison using threading reduction |
+| `analysis_julia/<variant>/figures/cut_eval/cut_eval_comparison_complexity.pdf` | Single-cut comparison using complexity reduction |
 
 The simulation and strategy evaluation remain complexity-agnostic; the PCA score is applied in post-processing. The legacy `entanglementScore` column is still written by the catalog, but `complexity_score` is the PCA-derived score.
 
@@ -258,12 +263,21 @@ oracle_by_complexity.pdf
 oracle_heatmap.pdf
 ```
 
-To recompute the complexity pass on an existing dataset:
+To recompute the complexity and cut-evaluation analysis on an existing dataset:
 
 ```bash
-python3 scripts/compute_complexity.py \
-  results/full_dataset_<timestamp>/{zero,current,high}/catalog.tsv \
-  --out-dir results/full_dataset_<timestamp>/complexity
+julia --project=cabletangleanalysis \
+  cabletangleanalysis/scripts/run_dataset.jl \
+  results/full_dataset_<timestamp> zero current high
+```
+
+or from the pipeline:
+
+```bash
+CABLESIM_PCA_ORIENTATION=positive \
+CABLESIM_COMPLEXITY_FILTER=identified \
+julia --project=cabletangleanalysis \
+  cabletangleanalysis/scripts/run_dataset.jl results/full_dataset_<timestamp>
 ```
 
 ### Command-line reference
@@ -287,7 +301,9 @@ python3 scripts/compute_complexity.py \
 | `--eval-oracle` | Also run the exhaustive single-cut oracle; implies `--eval-run` |
 | `--eval-cuts-to-zero` | Run cuts-to-zero evaluation |
 | `--eval-output=<path>` | Output file for cut-heuristic evaluation |
+| `--eval-stage-metrics-output=<path>` | Per-stage complexity metrics for cut evaluation (default: derived from `--eval-output`) |
 | `--eval-ctz-output=<path>` | Output file for cuts-to-zero evaluation |
+| `--eval-ctz-stage-metrics-output=<path>` | Per-stage complexity metrics for cuts-to-zero (default: derived from `--eval-ctz-output`) |
 | `--eval-random-trials=<n>` | Random edge/hoop trials per sample in cut evaluation (default 10) |
 | `--eval-ctz-max-cuts=<n>` | Maximum cuts per sample in cuts-to-zero evaluation (default 10) |
 | `--eval-ctz-random-trials=<n>` | Random edge/hoop trials per sample in cuts-to-zero evaluation (default 20) |
@@ -355,7 +371,7 @@ The checked-in `knot_cut_eval_v3.tsv` and `knot_cuts_to_zero_v3.tsv` files preda
 
 ### PCA workflow
 
-`run_pca.py` is the older PCA visualization helper and defaults to density/threading features. The dataset pipeline's complexity score uses `scripts/compute_complexity.py` with the five non-threading metrics described above.
+`run_pca.py` is the older PCA visualization helper and defaults to density/threading features. The dataset pipeline's complexity score is fitted by `cabletangleanalysis/src/complexity.jl` with the five non-threading metrics described above.
 
 After producing a density-normalized metrics table, run:
 
@@ -416,7 +432,8 @@ git submodule update --init --recursive
 - **CMake configure fails while cloning Discregrid/GenericParameters**: check Git/network access or provide the preinstalled paths shown above.
 - **Evaluation mode fails to open a window**: unattended modes still need an OpenGL context; use `xvfb-run -a`.
 - **Seed bank or catalog not found**: pass `--seed-bank` / `--catalog-file`, or run from the repository root so the default paths resolve.
-- **Complexity/oracle analysis fails with missing Python packages**: install `requirements.txt` in a virtual environment, or pass `--no-complexity` / `--no-oracle-analysis`.
+- **Complexity analysis fails with Julia missing**: install Julia and instantiate the `cabletangleanalysis` project (`julia --project=cabletangleanalysis -e 'using Pkg; Pkg.instantiate()'`), set `JULIA_BIN` / `JULIA_PROJECT`, or pass `--no-complexity`.
+- **Oracle analysis fails with missing Python packages**: install `requirements.txt` in a virtual environment, or pass `--no-oracle-analysis`.
 - **Knot type looks wrong for complex knots**: KymoKnot uses Alexander determinants at `t=-1` and `t=-2`; complex knots can share determinants with other knots. See `KymoKnot-clone/README.md` for details.
 
 ## License and upstream

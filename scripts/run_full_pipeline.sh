@@ -9,6 +9,8 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [ "$PYTHON_BIN" = "python3" ] && [ -x "$ROOT/.venv/bin/python" ]; then
   PYTHON_BIN="$ROOT/.venv/bin/python"
 fi
+JULIA_BIN="${JULIA_BIN:-julia}"
+JULIA_PROJECT="${JULIA_PROJECT:-$ROOT/cabletangleanalysis}"
 
 START_SEED=1
 END_SEED=1000
@@ -52,9 +54,10 @@ Options:
   --force                   Overwrite existing generated files
   --oracle                  Enable the exhaustive single-cut oracle (default)
   --no-oracle               Skip the exhaustive single-cut oracle
-  --no-complexity           Skip the PCA-derived complexity post-processing
+  --no-complexity           Skip the Julia PCA complexity and cut-stage analysis
   --no-complexity-per-variant
-                            Skip the separate-PCA-per-creep pass (default: on)
+                            Only fit the pooled Julia complexity model, not one
+                            model per creep variant (default: per-variant on)
   --no-oracle-analysis      Skip the oracle vs threading/complexity analysis
   --complexity-filter MODE  PCA training rows: all, identified, unidentified,
                             or non-unknot (default: identified)
@@ -82,8 +85,11 @@ Notes:
   * The script lowers the creep activation threshold to 0.0001. With the code
     default of 0.01, the mismatch under gravity-only settling stays below the
     threshold and all creep variants produce identical samples.
-  * The complexity pass requires Python 3 with NumPy and Matplotlib.
-    Use --no-complexity or --no-oracle-analysis to skip parts of it.
+  * The complexity pass runs Julia with the cabletangleanalysis project.
+    Set JULIA_BIN or JULIA_PROJECT to override the defaults. Use
+    --no-complexity to skip it.
+  * The oracle analysis still uses Python with Matplotlib. Use
+    --no-oracle-analysis to skip it.
   * Per-variant PCA and the oracle analysis run in multi-variant mode only.
 EOF
 }
@@ -312,6 +318,8 @@ run_worker() {
   local catalog_part="$variant_out/parts/catalog_${worker}.tsv"
   local cut_part="$variant_out/parts/cut_${worker}.tsv"
   local ctz_part="$variant_out/parts/ctz_${worker}.tsv"
+  local cut_stage_part="$variant_out/parts/cut_stage_${worker}.tsv"
+  local ctz_stage_part="$variant_out/parts/ctz_stage_${worker}.tsv"
   local seed_bank="$variant_out/parts/seed_bank_${worker}.txt"
   local oracle_args=()
   if [ "$EVAL_ORACLE" -eq 1 ]; then
@@ -342,6 +350,7 @@ run_worker() {
       --catalog-file="$catalog_part" \
       --eval-run \
       --eval-output="$cut_part" \
+      --eval-stage-metrics-output="$cut_stage_part" \
       --eval-random-trials="$EVAL_RANDOM_TRIALS" \
       "${oracle_args[@]}"
 
@@ -353,6 +362,7 @@ run_worker() {
       --catalog-file="$catalog_part" \
       --eval-cuts-to-zero \
       --eval-ctz-output="$ctz_part" \
+      --eval-ctz-stage-metrics-output="$ctz_stage_part" \
       --eval-ctz-max-cuts="$CTZ_MAX_CUTS" \
       --eval-ctz-random-trials="$CTZ_RANDOM_TRIALS"
 
@@ -396,9 +406,12 @@ run_variant() {
   if [ "$FORCE" -eq 1 ]; then
     rm -rf "$variant_out/parts" "$variant_out/logs" "$variant_out/work"
     rm -f "$variant_out/catalog.tsv" "$variant_out/cut_eval.tsv" \
-      "$variant_out/cuts_to_zero.tsv" "$variant_out/summary.txt"
+      "$variant_out/cuts_to_zero.tsv" \
+      "$variant_out/cut_eval_stage_metrics.tsv" \
+      "$variant_out/cuts_to_zero_stage_metrics.tsv" "$variant_out/summary.txt"
   else
-    for output_name in catalog.tsv cut_eval.tsv cuts_to_zero.tsv; do
+    for output_name in catalog.tsv cut_eval.tsv cuts_to_zero.tsv \
+      cut_eval_stage_metrics.tsv cuts_to_zero_stage_metrics.tsv; do
       [ ! -e "$variant_out/$output_name" ] || \
         die "$variant_out/$output_name already exists; use --force or a different --out"
     done
@@ -439,15 +452,21 @@ run_variant() {
   local catalog_parts=()
   local cut_parts=()
   local ctz_parts=()
+  local cut_stage_parts=()
+  local ctz_stage_parts=()
   for worker in $(seq 1 "$WORKERS"); do
     catalog_parts+=("$variant_out/parts/catalog_${worker}.tsv")
     cut_parts+=("$variant_out/parts/cut_${worker}.tsv")
     ctz_parts+=("$variant_out/parts/ctz_${worker}.tsv")
+    cut_stage_parts+=("$variant_out/parts/cut_stage_${worker}.tsv")
+    ctz_stage_parts+=("$variant_out/parts/ctz_stage_${worker}.tsv")
   done
 
   merge_parts "$variant_out/catalog.tsv" "${catalog_parts[@]}"
   merge_parts "$variant_out/cut_eval.tsv" "${cut_parts[@]}"
   merge_parts "$variant_out/cuts_to_zero.tsv" "${ctz_parts[@]}"
+  merge_parts "$variant_out/cut_eval_stage_metrics.tsv" "${cut_stage_parts[@]}"
+  merge_parts "$variant_out/cuts_to_zero_stage_metrics.tsv" "${ctz_stage_parts[@]}"
 
   local unique_seeds
   unique_seeds="$(awk -F'\t' 'NR > 1 && $2 ~ /^[0-9]+$/ { print $2 }' "$variant_out/catalog.tsv" | sort -n | uniq | wc -l)"
@@ -457,6 +476,10 @@ run_variant() {
   cut_rows=$(($(wc -l < "$variant_out/cut_eval.tsv") - 1))
   local ctz_rows
   ctz_rows=$(($(wc -l < "$variant_out/cuts_to_zero.tsv") - 1))
+  local cut_stage_rows
+  cut_stage_rows=$(($(wc -l < "$variant_out/cut_eval_stage_metrics.tsv") - 1))
+  local ctz_stage_rows
+  ctz_stage_rows=$(($(wc -l < "$variant_out/cuts_to_zero_stage_metrics.tsv") - 1))
 
   [ "$unique_seeds" -eq "$TOTAL" ] || \
     die "catalog has $unique_seeds unique seeds, expected $TOTAL"
@@ -481,6 +504,8 @@ run_variant() {
     echo "unique_seeds=$unique_seeds"
     echo "cut_rows=$cut_rows"
     echo "ctz_rows=$ctz_rows"
+    echo "cut_stage_rows=$cut_stage_rows"
+    echo "ctz_stage_rows=$ctz_stage_rows"
     echo "creep_settle_steps=$CREEP_SETTLE_STEPS"
     echo "creep_threshold=$CREEP_THRESHOLD"
     echo "eval_random_trials=$EVAL_RANDOM_TRIALS"
@@ -492,12 +517,13 @@ run_variant() {
   echo "catalog:       $variant_out/catalog.tsv"
   echo "cut eval:      $variant_out/cut_eval.tsv"
   echo "cuts to zero:  $variant_out/cuts_to_zero.tsv"
+  echo "cut stages:    $variant_out/cut_eval_stage_metrics.tsv"
+  echo "ctz stages:    $variant_out/cuts_to_zero_stage_metrics.tsv"
   echo "logs:          $variant_out/logs"
 }
 
 START_ALL_TS=$(date +%s)
 printf 'variant\tcreep\tsettle_steps\tthreshold\tseeds\telapsed_seconds\tcatalog\tcut_eval\tcuts_to_zero\n' > "$MANIFEST"
-variant_catalogs=()
 
 for variant_spec in "${VARIANTS[@]}"; do
   label="${variant_spec%%:*}"
@@ -510,7 +536,6 @@ for variant_spec in "${VARIANTS[@]}"; do
   fi
 
   run_variant "$label" "$creep" "$variant_out"
-  variant_catalogs+=("$variant_out/catalog.tsv")
 
   elapsed="$(awk -F= '$1 == "elapsed_seconds" { print $2 }' "$variant_out/summary.txt")"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -525,29 +550,28 @@ TOTAL_ELAPSED=$((END_ALL_TS - START_ALL_TS))
 if [ "$RUN_COMPLEXITY" -eq 1 ] && [ "$TOTAL" -lt 2 ]; then
   echo "warning: skipping complexity pass; at least two seeds are required for PCA"
 elif [ "$RUN_COMPLEXITY" -eq 1 ]; then
-  { [ -x "$PYTHON_BIN" ] || command -v "$PYTHON_BIN" >/dev/null 2>&1; } || \
-    die "python3 not found; use --no-complexity to skip the PCA pass"
-  "$PYTHON_BIN" -c 'import numpy' >/dev/null 2>&1 || \
-    die "NumPy not found; install requirements.txt or use --no-complexity"
+  { [ -x "$JULIA_BIN" ] || command -v "$JULIA_BIN" >/dev/null 2>&1; } || \
+    die "$JULIA_BIN not found; install Julia or use --no-complexity to skip the PCA pass"
 
-  echo "running pooled PCA complexity pass"
-  "$PYTHON_BIN" "$ROOT/scripts/compute_complexity.py" \
-    "${variant_catalogs[@]}" \
-    --out-dir "$OUT_DIR/complexity" \
-    --knot-filter "$COMPLEXITY_FILTER" \
-    --pca-orientation "$PCA_ORIENTATION"
-
-  if [ "$MODE" = "multi" ] && [ "$COMPLEXITY_PER_VARIANT" -eq 1 ]; then
-    echo "running per-variant PCA complexity pass"
-    "$PYTHON_BIN" "$ROOT/scripts/compute_complexity.py" \
-      "${variant_catalogs[@]}" \
-      --out-dir "$OUT_DIR/complexity/per_variant" \
-      --knot-filter "$COMPLEXITY_FILTER" \
-      --pca-orientation "$PCA_ORIENTATION" \
-      --per-variant
-
-    echo "per-variant:   $OUT_DIR/complexity/per_variant"
+  echo "running Julia complexity and cut-evaluation pass"
+  export CABLESIM_PCA_ORIENTATION="$PCA_ORIENTATION"
+  export CABLESIM_COMPLEXITY_FILTER="$COMPLEXITY_FILTER"
+  export CABLESIM_COMPLEXITY_PER_VARIANT="$COMPLEXITY_PER_VARIANT"
+  if [ "$MODE" = "multi" ]; then
+    julia_variants=()
+    for variant_spec in "${VARIANTS[@]}"; do
+      julia_variants+=("${variant_spec%%:*}")
+    done
+    "$JULIA_BIN" --project="$JULIA_PROJECT" \
+      "$ROOT/cabletangleanalysis/scripts/run_dataset.jl" \
+      "$OUT_DIR" "${julia_variants[@]}"
+  else
+    "$JULIA_BIN" --project="$JULIA_PROJECT" \
+      "$ROOT/cabletangleanalysis/scripts/run_dataset.jl" \
+      "$OUT_DIR" "$OUT_DIR"
   fi
+
+  echo "analysis:      $OUT_DIR/analysis_julia"
 fi
 
 if [ "$MODE" = "multi" ] && [ "$RUN_ORACLE_ANALYSIS" -eq 1 ] && [ "$EVAL_ORACLE" -eq 1 ] && [ "$TOTAL" -ge 2 ]; then
@@ -559,7 +583,6 @@ if [ "$MODE" = "multi" ] && [ "$RUN_ORACLE_ANALYSIS" -eq 1 ] && [ "$EVAL_ORACLE"
   echo "running oracle threading/complexity analysis"
   "$PYTHON_BIN" "$ROOT/scripts/analyze_oracle.py" \
     --dataset-root "$OUT_DIR" \
-    --complexity-root "$OUT_DIR/complexity/per_variant" \
     --out-dir "$OUT_DIR/analysis_oracle"
 
   echo "oracle analysis: $OUT_DIR/analysis_oracle"
