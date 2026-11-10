@@ -250,6 +250,19 @@ fi
 [ -x "$KYMOKNOT_BIN" ] || die "KymoKnot is not executable: $KYMOKNOT_BIN (run: make -C KymoKnot-clone)"
 command -v Xvfb >/dev/null 2>&1 || die "Xvfb not found; install it (e.g. apt install xvfb)"
 
+if [ "$RUN_COMPLEXITY" -eq 1 ]; then
+  { [ -x "$JULIA_BIN" ] || command -v "$JULIA_BIN" >/dev/null 2>&1; } || \
+    die "$JULIA_BIN not found; install Julia, set JULIA_BIN, or use --no-complexity"
+  [ -f "$JULIA_PROJECT/Project.toml" ] || \
+    die "Julia project not found: $JULIA_PROJECT (set JULIA_PROJECT)"
+  [ -f "$ROOT/cabletangleanalysis/scripts/run_dataset.jl" ] || \
+    die "Julia analysis driver missing; initialize the cabletangleanalysis submodule"
+  echo "checking Julia analysis environment"
+  "$JULIA_BIN" --project="$JULIA_PROJECT" \
+    -e 'using CableTangleAnalysis' >/dev/null 2>&1 || \
+    die "Julia project is not ready; run: $JULIA_BIN --project=\"$JULIA_PROJECT\" -e 'using Pkg; Pkg.instantiate()'"
+fi
+
 if [ -n "$SINGLE_CREEP" ]; then
   MODE="single"
   VARIANTS=("single:$SINGLE_CREEP")
@@ -661,7 +674,7 @@ elif [ "$RUN_COMPLEXITY" -eq 1 ]; then
   else
     "$JULIA_BIN" --project="$JULIA_PROJECT" \
       "$ROOT/cabletangleanalysis/scripts/run_dataset.jl" \
-      "$OUT_DIR" "$OUT_DIR"
+      "$OUT_DIR" "single=$OUT_DIR"
   fi
 
   echo "analysis:      $OUT_DIR/analysis_julia"
