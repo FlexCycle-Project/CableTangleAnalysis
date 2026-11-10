@@ -290,7 +290,11 @@ julia --project=cabletangleanalysis \
 ```
 
 The core outputs live under `analysis_julia_core/<variant>/` and include
-`tables/pca_results.tsv` and `tables/pca_scores.tsv`.
+`tables/pca_results.tsv`, `tables/pca_scores.tsv`,
+`figures/cut_eval/cut_eval_comparison_complexity.pdf` (first-cut complexity
+reduction), and `figures/cut_eval/complexity_reduction_resolved.pdf`
+(complexity reduction after threading resolution). Both complexity plots show
+the positive and signed PC1 reductions.
 
 ### Command-line reference
 
