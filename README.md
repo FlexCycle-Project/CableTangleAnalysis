@@ -280,6 +280,18 @@ julia --project=cabletangleanalysis \
   cabletangleanalysis/scripts/run_dataset.jl results/full_dataset_<timestamp>
 ```
 
+For the reduced analysis set (knot distribution, PCA, correlation, cut-eval
+comparisons, cuts histogram, and PCA tables):
+
+```bash
+julia --project=cabletangleanalysis \
+  cabletangleanalysis/scripts/run_dataset_core.jl \
+  results/full_dataset_<timestamp> zero current high
+```
+
+The core outputs live under `analysis_julia_core/<variant>/` and include
+`tables/pca_results.tsv` and `tables/pca_scores.tsv`.
+
 ### Command-line reference
 
 | Argument | Description |
