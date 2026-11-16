@@ -27,6 +27,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 #if defined(_DEBUG) && !defined(EIGEN_ALIGN)
@@ -75,6 +76,7 @@ static void evaluateCurrentCableTanglement(bool saveSeedPreset);
 static void evaluateAndRecordCatalogSample(bool printReport);
 static void evaluateAndRecordCutHeuristicSample();
 static void evaluateAndRecordCutsToZeroSample();
+static void evaluateAndRecordCutsToZeroOracleSample();
 static void appendCatalogRows(
     const std::vector<std::vector<Vector3r>>& ropePieces,
     const std::vector<SelfCollisionContact>& contacts,
@@ -92,6 +94,7 @@ static std::string resolveDefaultKnotSeedBankPath();
 static std::string resolveDefaultKnotSeedCatalogPath();
 static std::string resolveDefaultCutEvalOutputPath();
 static std::string resolveDefaultCutsToZeroEvalOutputPath();
+static std::string resolveDefaultCutsToZeroOracleOutputPath();
 static size_t countCurvatureSamples(const std::vector<Vector3r>& points);
 static Real computeTotalCurvature(const std::vector<Vector3r>& points);
 static Real computeCurvatureOutsideKnotRegions(
@@ -102,6 +105,7 @@ static void generateNextCatalogSeed();
 static bool loadCutEvalCatalog();
 static bool prepareCutEvalOutputFile();
 static bool prepareCutsToZeroEvalOutputFile();
+static bool prepareCutsToZeroOracleOutputFile();
 static void prepareCutEvalSeed(size_t index);
 static void generateNextCutEvalSeed();
 
@@ -134,11 +138,15 @@ static std::string g_evalOutputPath;
 static unsigned int g_evalRandomTrials = 10;
 static bool g_evalOracleEnabled = false;
 static bool g_evalCutsToZeroEnabled = false;
+static bool g_evalCutsToZeroOracleOnly = false;
 static std::string g_evalCutsToZeroOutputPath;
+static std::string g_evalCutsToZeroOracleOutputPath;
 static std::string g_evalStageMetricsOutputPath;
 static std::string g_evalCutsToZeroStageMetricsOutputPath;
+static std::string g_evalCutsToZeroOracleStageMetricsOutputPath;
 static unsigned int g_evalCutsToZeroMaxCuts = 10;
 static unsigned int g_evalCutsToZeroRandomTrials = 20;
+static unsigned long long g_evalCutsToZeroOracleMaxNodes = 5000000ULL;
 static size_t g_evalCurrentIndex = 0;
 static size_t g_evalSamplesWritten = 0;
 struct CutEvalSeedRecord
@@ -252,6 +260,16 @@ static std::string resolveDefaultCutsToZeroEvalOutputPath()
         return "knot_cuts_to_zero.tsv";
 
     return catalogPath.substr(0, slashPos + 1) + "knot_cuts_to_zero.tsv";
+}
+
+static std::string resolveDefaultCutsToZeroOracleOutputPath()
+{
+    const std::string base = resolveDefaultCutsToZeroEvalOutputPath();
+    const size_t dotPos = base.find_last_of('.');
+    if (dotPos == std::string::npos)
+        return base + "_oracle.tsv";
+
+    return base.substr(0, dotPos) + "_oracle.tsv";
 }
 
 static std::string deriveStageMetricsPath(const std::string& evalPath)
@@ -416,6 +434,41 @@ static bool prepareCutsToZeroEvalOutputFile()
     return prepareStageMetricsOutputFile(
         g_evalCutsToZeroStageMetricsOutputPath,
         g_evalCutsToZeroOutputPath);
+}
+
+static bool prepareCutsToZeroOracleOutputFile()
+{
+    if (g_evalCutsToZeroOracleOutputPath.empty())
+        g_evalCutsToZeroOracleOutputPath = resolveDefaultCutsToZeroOracleOutputPath();
+
+    std::ofstream out(g_evalCutsToZeroOracleOutputPath, std::ios::trunc);
+    if (!out)
+    {
+        std::cout << "[ctz-oracle] could not open output file "
+                  << g_evalCutsToZeroOracleOutputPath << std::endl;
+        return false;
+    }
+
+    out << "seed\tknotType\tT_before\toracle_cuts\toracle_resolved"
+        << "\toracle_exhaustive\toracle_nodes\toracle_sequence\n";
+
+    if (g_evalCutsToZeroOracleStageMetricsOutputPath.empty())
+    {
+        g_evalCutsToZeroOracleStageMetricsOutputPath =
+            deriveStageMetricsPath(g_evalCutsToZeroOracleOutputPath);
+    }
+
+    if (!prepareStageMetricsOutputFile(
+            g_evalCutsToZeroOracleStageMetricsOutputPath,
+            g_evalCutsToZeroOracleOutputPath))
+    {
+        return false;
+    }
+
+    // appendCutStageMetricsRow routes cuts_to_zero rows through this path.
+    g_evalCutsToZeroStageMetricsOutputPath =
+        g_evalCutsToZeroOracleStageMetricsOutputPath;
+    return true;
 }
 
 static bool loadKnotSeedPresetFile()
@@ -1657,6 +1710,442 @@ namespace
             outcome.cuts = maxCuts;
         return outcome;
     }
+
+    // ── Complete hoop-midpoint oracle ────────────────────────────────────
+    //
+    // The oracle evaluates only hoop-midpoint cuts, but it looks ahead until
+    // it can prove the smallest number of cuts that reaches threading == 0.
+    // Cuts are identified by their original (piece, edge) coordinates so the
+    // search state is independent of cut order.
+
+    struct OracleCut
+    {
+        size_t pieceIndex = 0;
+        size_t edgeIndex = 0;
+    };
+
+    struct OracleState
+    {
+        std::vector<std::vector<Vector3r>> pieces;
+        std::vector<size_t> originalPiece;
+        std::vector<size_t> originalOffset;
+        std::vector<OracleCut> cuts;
+        int threading = 0;
+    };
+
+    struct OracleCandidate
+    {
+        OracleCut cut;
+        OracleState child;
+        int threadingAfter = 0;
+        int delta = 0;
+        int hoopScore = 0;
+    };
+
+    struct OraclePathResult
+    {
+        std::vector<OracleCut> path;
+        unsigned int cuts = 0;
+        bool resolved = false;
+        bool exhaustive = false;
+        unsigned long long nodes = 0;
+    };
+
+    static bool oracleCutLess(const OracleCut& a, const OracleCut& b)
+    {
+        if (a.pieceIndex != b.pieceIndex)
+            return a.pieceIndex < b.pieceIndex;
+        return a.edgeIndex < b.edgeIndex;
+    }
+
+    static std::string oracleStateKey(const OracleState& state)
+    {
+        std::string key;
+        key.reserve(state.cuts.size() * sizeof(uint64_t));
+        for (const OracleCut& cut : state.cuts)
+        {
+            const uint64_t packed =
+                (static_cast<uint64_t>(cut.pieceIndex) << 32) |
+                static_cast<uint64_t>(cut.edgeIndex);
+            key.append(
+                reinterpret_cast<const char*>(&packed),
+                sizeof(packed));
+        }
+        return key;
+    }
+
+    static OracleState makeOracleState(
+        const std::vector<std::vector<Vector3r>>& startPieces)
+    {
+        OracleState state;
+        state.pieces = startPieces;
+        state.originalPiece.resize(startPieces.size());
+        state.originalOffset.assign(startPieces.size(), 0);
+        for (size_t i = 0; i < startPieces.size(); ++i)
+            state.originalPiece[i] = i;
+        state.threading = computeThreadingCountGeometryOnly(state.pieces);
+        return state;
+    }
+
+    static bool applyOracleCut(
+        const OracleState& state,
+        size_t pieceIndex,
+        size_t edgeIndex,
+        OracleState& child,
+        OracleCut& cut)
+    {
+        if (pieceIndex >= state.pieces.size())
+            return false;
+        const std::vector<Vector3r>& piece = state.pieces[pieceIndex];
+        if (piece.size() < 4 || edgeIndex < 1 || edgeIndex + 2 >= piece.size())
+            return false;
+
+        child = state;
+        std::vector<Vector3r>& target = child.pieces[pieceIndex];
+        std::vector<Vector3r> left(
+            target.begin(),
+            target.begin() + static_cast<std::ptrdiff_t>(edgeIndex + 1));
+        std::vector<Vector3r> right(
+            target.begin() + static_cast<std::ptrdiff_t>(edgeIndex + 1),
+            target.end());
+        if (left.size() < 2 || right.size() < 2)
+            return false;
+
+        target = std::move(left);
+        child.pieces.insert(
+            child.pieces.begin() + static_cast<std::ptrdiff_t>(pieceIndex + 1),
+            std::move(right));
+
+        const size_t originPiece = state.originalPiece[pieceIndex];
+        const size_t originOffset = state.originalOffset[pieceIndex];
+        child.originalPiece.insert(
+            child.originalPiece.begin() + static_cast<std::ptrdiff_t>(pieceIndex + 1),
+            originPiece);
+        child.originalOffset.insert(
+            child.originalOffset.begin() + static_cast<std::ptrdiff_t>(pieceIndex + 1),
+            originOffset + edgeIndex + 1);
+
+        cut.pieceIndex = originPiece;
+        cut.edgeIndex = originOffset + edgeIndex;
+        const auto insertAt = std::lower_bound(
+            child.cuts.begin(),
+            child.cuts.end(),
+            cut,
+            oracleCutLess);
+        child.cuts.insert(insertAt, cut);
+        child.threading = computeThreadingCountGeometryOnly(child.pieces);
+        return true;
+    }
+
+    static bool applyOracleCutById(
+        const OracleState& state,
+        const OracleCut& cut,
+        OracleState& child)
+    {
+        for (size_t pieceIndex = 0; pieceIndex < state.pieces.size(); ++pieceIndex)
+        {
+            if (state.originalPiece[pieceIndex] != cut.pieceIndex)
+                continue;
+
+            const size_t offset = state.originalOffset[pieceIndex];
+            if (cut.edgeIndex < offset)
+                continue;
+            if (state.pieces[pieceIndex].size() < 2)
+                continue;
+
+            const size_t localEdge = cut.edgeIndex - offset;
+            if (localEdge >= state.pieces[pieceIndex].size() - 1)
+                continue;
+
+            OracleCut applied;
+            return applyOracleCut(state, pieceIndex, localEdge, child, applied);
+        }
+        return false;
+    }
+
+    static void sortOracleCandidates(
+        std::vector<OracleCandidate>& candidates,
+        bool byHoopScore)
+    {
+        if (byHoopScore)
+        {
+            std::sort(
+                candidates.begin(),
+                candidates.end(),
+                [](const OracleCandidate& a, const OracleCandidate& b)
+                {
+                    if (a.hoopScore != b.hoopScore)
+                        return a.hoopScore > b.hoopScore;
+                    if (a.delta != b.delta)
+                        return a.delta > b.delta;
+                    if (a.threadingAfter != b.threadingAfter)
+                        return a.threadingAfter < b.threadingAfter;
+                    return oracleCutLess(a.cut, b.cut);
+                });
+            return;
+        }
+
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](const OracleCandidate& a, const OracleCandidate& b)
+            {
+                if (a.delta != b.delta)
+                    return a.delta > b.delta;
+                if (a.threadingAfter != b.threadingAfter)
+                    return a.threadingAfter < b.threadingAfter;
+                if (a.hoopScore != b.hoopScore)
+                    return a.hoopScore > b.hoopScore;
+                return oracleCutLess(a.cut, b.cut);
+            });
+    }
+
+    static std::vector<OracleCandidate> collectOracleCandidates(
+        const OracleState& state)
+    {
+        std::vector<OracleCandidate> candidates;
+        if (state.threading == 0)
+            return candidates;
+
+        const TanglementAnalyzer::TanglementAnalysisResult tanglement =
+            TanglementAnalyzer::analyzeTanglementGeometryOnly(
+                state.pieces,
+                {},
+                g_cfg.rope,
+                g_cfg.selfCollision);
+        const std::vector<VirtualCutTarget> targets =
+            collectHoopCutTargets(tanglement, state.pieces);
+
+        std::set<std::pair<size_t, size_t>> seen;
+        for (const VirtualCutTarget& target : targets)
+        {
+            if (!target.valid)
+                continue;
+            const std::pair<size_t, size_t> key(
+                target.pieceIndex,
+                target.edgeIndex);
+            if (!seen.insert(key).second)
+                continue;
+
+            OracleState child;
+            OracleCut cut;
+            if (!applyOracleCut(
+                    state,
+                    target.pieceIndex,
+                    target.edgeIndex,
+                    child,
+                    cut))
+            {
+                continue;
+            }
+
+            OracleCandidate candidate;
+            candidate.cut = cut;
+            candidate.threadingAfter = child.threading;
+            candidate.delta = state.threading - child.threading;
+            candidate.hoopScore = target.hoopScore;
+            candidate.child = std::move(child);
+            candidates.push_back(std::move(candidate));
+        }
+
+        sortOracleCandidates(candidates, false);
+        return candidates;
+    }
+
+    static OraclePathResult runOracleGreedy(
+        const OracleState& start,
+        unsigned int maxCuts,
+        bool byHoopScore)
+    {
+        OraclePathResult result;
+        OracleState state = start;
+
+        while (state.threading > 0 && result.path.size() < maxCuts)
+        {
+            std::vector<OracleCandidate> candidates =
+                collectOracleCandidates(state);
+            if (candidates.empty())
+                break;
+
+            if (byHoopScore)
+                sortOracleCandidates(candidates, true);
+
+            const OracleCandidate& best = candidates.front();
+            result.path.push_back(best.cut);
+            state = std::move(best.child);
+        }
+
+        result.resolved = state.threading == 0;
+        result.cuts = static_cast<unsigned int>(result.path.size());
+        if (!result.resolved)
+            result.cuts = maxCuts;
+        return result;
+    }
+
+    struct OracleSearchBudget
+    {
+        unsigned long long maxNodes = 0;
+        unsigned long long nodes = 0;
+        bool aborted = false;
+    };
+
+    static bool oracleDepthLimitedSearch(
+        const OracleState& state,
+        int remaining,
+        std::unordered_map<std::string, int>& visited,
+        std::vector<OracleCut>& path,
+        OracleSearchBudget& budget)
+    {
+        if (state.threading == 0)
+            return true;
+        if (remaining == 0)
+            return false;
+
+        const std::string key = oracleStateKey(state);
+        const auto existing = visited.find(key);
+        if (existing != visited.end() && existing->second >= remaining)
+            return false;
+        visited[key] = remaining;
+
+        ++budget.nodes;
+        if (budget.maxNodes > 0 && budget.nodes > budget.maxNodes)
+        {
+            budget.aborted = true;
+            return false;
+        }
+
+        std::vector<OracleCandidate> candidates =
+            collectOracleCandidates(state);
+        for (const OracleCandidate& candidate : candidates)
+        {
+            path.push_back(candidate.cut);
+            if (oracleDepthLimitedSearch(
+                    candidate.child,
+                    remaining - 1,
+                    visited,
+                    path,
+                    budget))
+            {
+                return true;
+            }
+            path.pop_back();
+
+            if (budget.aborted)
+                return false;
+        }
+        return false;
+    }
+
+    static OraclePathResult runOracleExact(
+        const OracleState& start,
+        const OraclePathResult& fallback,
+        unsigned int maxCuts,
+        unsigned long long maxNodes)
+    {
+        OraclePathResult result;
+        result.path = fallback.path;
+        result.cuts = fallback.cuts;
+        result.resolved = fallback.resolved;
+        result.exhaustive = false;
+
+        if (start.threading == 0)
+        {
+            result.path.clear();
+            result.cuts = 0;
+            result.resolved = true;
+            result.exhaustive = true;
+            return result;
+        }
+
+        const int upper = fallback.resolved
+            ? static_cast<int>(fallback.cuts)
+            : static_cast<int>(maxCuts) + 1;
+        OracleSearchBudget budget;
+        budget.maxNodes = maxNodes;
+        bool allLowerExhausted = true;
+
+        for (int limit = 1;
+             limit < upper && limit <= static_cast<int>(maxCuts);
+             ++limit)
+        {
+            std::unordered_map<std::string, int> visited;
+            std::vector<OracleCut> path;
+            if (oracleDepthLimitedSearch(
+                    start,
+                    limit,
+                    visited,
+                    path,
+                    budget))
+            {
+                result.path = path;
+                result.cuts = static_cast<unsigned int>(limit);
+                result.resolved = true;
+                result.exhaustive = allLowerExhausted;
+                result.nodes = budget.nodes;
+                return result;
+            }
+
+            if (budget.aborted)
+            {
+                allLowerExhausted = false;
+                break;
+            }
+        }
+
+        result.nodes = budget.nodes;
+        result.exhaustive = allLowerExhausted && !budget.aborted;
+        if (!fallback.resolved)
+        {
+            result.cuts = maxCuts;
+            result.resolved = false;
+        }
+        return result;
+    }
+
+    static OraclePathResult runCompleteOracleCutsToZero(
+        const std::vector<std::vector<Vector3r>>& startPieces,
+        unsigned int maxCuts,
+        unsigned long long maxNodes)
+    {
+        const OracleState start = makeOracleState(startPieces);
+        OraclePathResult deltaGreedy = runOracleGreedy(start, maxCuts, false);
+        OraclePathResult hoopGreedy = runOracleGreedy(start, maxCuts, true);
+
+        OraclePathResult fallback = deltaGreedy;
+        if (hoopGreedy.resolved &&
+            (!fallback.resolved || hoopGreedy.cuts < fallback.cuts))
+        {
+            fallback = hoopGreedy;
+        }
+
+        return runOracleExact(start, fallback, maxCuts, maxNodes);
+    }
+
+    static bool replayOraclePath(
+        const std::vector<std::vector<Vector3r>>& startPieces,
+        const std::vector<OracleCut>& path,
+        const CutStageLogContext& stageContext,
+        unsigned int& finalCuts,
+        bool& finalResolved)
+    {
+        OracleState state = makeOracleState(startPieces);
+        recordCutStage(stageContext, 0, 0, state.pieces);
+
+        unsigned int stage = 0;
+        for (const OracleCut& cut : path)
+        {
+            OracleState child;
+            if (!applyOracleCutById(state, cut, child))
+                return false;
+            state = std::move(child);
+            ++stage;
+            recordCutStage(stageContext, stage, stage, state.pieces);
+        }
+
+        finalCuts = stage;
+        finalResolved = state.threading == 0;
+        return true;
+    }
 }
 
 static void evaluateAndRecordCutHeuristicSample()
@@ -2101,6 +2590,126 @@ static void evaluateAndRecordCutsToZeroSample()
               << std::endl;
 }
 
+static void evaluateAndRecordCutsToZeroOracleSample()
+{
+    if (g_evalCurrentIndex >= g_evalSeeds.size())
+        return;
+
+    SimulationModel* model = Simulation::getCurrent()->getModel();
+    if (model == nullptr)
+        return;
+
+    const CutEvalSeedRecord& record = g_evalSeeds[g_evalCurrentIndex];
+    const std::vector<std::vector<Vector3r>> ropePieces =
+        collectCurrentCablePieces(model);
+    const TanglementAnalyzer::TanglementAnalysisResult initialTanglement =
+        TanglementAnalyzer::analyzeTanglementGeometryOnly(
+            ropePieces,
+            {},
+            g_cfg.rope,
+            g_cfg.selfCollision);
+    const int beforeThreading =
+        TanglementAnalyzer::computeThreadingMetrics(initialTanglement).totalThreadingCount;
+
+    auto makeStageContext = [&](const std::string& strategy, unsigned int trial)
+    {
+        CutStageLogContext context;
+        context.eval = "cuts_to_zero";
+        context.seed = record.seed;
+        context.knotType = record.knotType;
+        context.strategy = strategy;
+        context.trial = trial;
+        context.enabled = !g_evalCutsToZeroStageMetricsOutputPath.empty();
+        return context;
+    };
+
+    OraclePathResult result;
+    if (beforeThreading == 0)
+    {
+        result.resolved = true;
+        result.cuts = 0;
+        result.exhaustive = true;
+        result.nodes = 0;
+    }
+    else
+    {
+        result = runCompleteOracleCutsToZero(
+            ropePieces,
+            g_evalCutsToZeroMaxCuts,
+            g_evalCutsToZeroOracleMaxNodes);
+    }
+
+    unsigned int replayCuts = 0;
+    bool replayResolved = false;
+    const bool replayOk = replayOraclePath(
+        ropePieces,
+        result.path,
+        makeStageContext("oracle", 0),
+        replayCuts,
+        replayResolved);
+
+    unsigned int reportedCuts = result.resolved
+        ? replayCuts
+        : g_evalCutsToZeroMaxCuts;
+    bool reportedResolved = result.resolved && replayResolved;
+    bool reportedExhaustive = result.exhaustive && replayOk;
+
+    if (result.resolved && replayOk && replayCuts != result.cuts)
+    {
+        std::cout << "[ctz-oracle] warning: search found "
+                  << result.cuts << " cuts but replay used "
+                  << replayCuts << " cuts for seed=" << record.seed
+                  << std::endl;
+    }
+    if (!replayOk)
+    {
+        std::cout << "[ctz-oracle] warning: could not replay oracle path for seed="
+                  << record.seed << std::endl;
+        reportedResolved = false;
+        reportedCuts = g_evalCutsToZeroMaxCuts;
+    }
+
+    std::string sequence;
+    for (size_t i = 0; i < result.path.size(); ++i)
+    {
+        if (i > 0)
+            sequence += ';';
+        sequence += std::to_string(result.path[i].pieceIndex);
+        sequence += ':';
+        sequence += std::to_string(result.path[i].edgeIndex);
+    }
+
+    std::ofstream out(g_evalCutsToZeroOracleOutputPath, std::ios::app);
+    if (!out)
+    {
+        std::cout << "[ctz-oracle] could not append to "
+                  << g_evalCutsToZeroOracleOutputPath << std::endl;
+        g_evalCutsToZeroOracleOnly = false;
+        return;
+    }
+
+    out << std::fixed << std::setprecision(6)
+        << record.seed << '\t'
+        << record.knotType << '\t'
+        << beforeThreading << '\t'
+        << reportedCuts << '\t'
+        << (reportedResolved ? 1 : 0) << '\t'
+        << (reportedExhaustive ? 1 : 0) << '\t'
+        << result.nodes << '\t'
+        << sequence << '\n';
+
+    ++g_evalSamplesWritten;
+    std::cout << "[ctz-oracle] seed=" << record.seed
+              << " knotType=" << record.knotType
+              << " T_before=" << beforeThreading
+              << " oracleCuts=" << reportedCuts
+              << " resolved=" << (reportedResolved ? 1 : 0)
+              << " exhaustive=" << (reportedExhaustive ? 1 : 0)
+              << " nodes=" << result.nodes
+              << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
+              << std::endl;
+}
+
 static void prepareCatalogSeedForNextRun()
 {
     unsigned int nextSeed = 0;
@@ -2242,6 +2851,36 @@ int main(int argc, char** argv)
         else if (arg == "--eval-cuts-to-zero")
         {
             g_evalCutsToZeroEnabled = true;
+        }
+        else if (arg == "--eval-ctz-oracle-only")
+        {
+            g_evalCutsToZeroOracleOnly = true;
+            g_evalCutsToZeroEnabled = false;
+        }
+        else if (arg.rfind("--eval-ctz-oracle-output=", 0) == 0)
+        {
+            g_evalCutsToZeroOracleOutputPath =
+                arg.substr(std::string("--eval-ctz-oracle-output=").size());
+        }
+        else if (arg.rfind("--eval-ctz-oracle-stage-metrics-output=", 0) == 0)
+        {
+            g_evalCutsToZeroOracleStageMetricsOutputPath =
+                arg.substr(
+                    std::string("--eval-ctz-oracle-stage-metrics-output=").size());
+        }
+        else if (arg.rfind("--eval-ctz-oracle-max-nodes=", 0) == 0)
+        {
+            try
+            {
+                g_evalCutsToZeroOracleMaxNodes = static_cast<unsigned long long>(
+                    std::stoull(
+                        arg.substr(
+                            std::string("--eval-ctz-oracle-max-nodes=").size())));
+            }
+            catch (...)
+            {
+                g_evalCutsToZeroOracleMaxNodes = 5000000ULL;
+            }
         }
         else if (arg.rfind("--eval-output=", 0) == 0)
         {
@@ -2427,6 +3066,31 @@ int main(int argc, char** argv)
                       << " samples=" << g_evalSeeds.size()
                       << " randomTrials=" << g_evalRandomTrials
                       << " output=" << g_evalOutputPath << std::endl;
+        }
+    }
+
+    if (g_evalCutsToZeroOracleOnly)
+    {
+        g_catalogRunEnabled = false;
+        g_evalRunEnabled = false;
+        g_evalCutsToZeroEnabled = false;
+        g_catalogRenderEnabled = false;
+        if (!loadCutEvalCatalog() || !prepareCutsToZeroOracleOutputFile())
+        {
+            std::cerr << "[ctz-oracle] setup failed; exiting instead of entering "
+                         "the interactive loop" << std::endl;
+            std::exit(EXIT_FAILURE);
+        }
+        else
+        {
+            prepareCutEvalSeed(0);
+            std::cout << "[ctz-oracle] running unattended complete-oracle evaluation"
+                      << " seed=" << g_cfg.randomCable.seed
+                      << " samples=" << g_evalSeeds.size()
+                      << " maxCuts=" << g_evalCutsToZeroMaxCuts
+                      << " maxNodes=" << g_evalCutsToZeroOracleMaxNodes
+                      << " output=" << g_evalCutsToZeroOracleOutputPath
+                      << std::endl;
         }
     }
 
@@ -2943,6 +3607,7 @@ static void timeStep()
     if (!g_catalogRunEnabled &&
         !g_evalRunEnabled &&
         !g_evalCutsToZeroEnabled &&
+        !g_evalCutsToZeroOracleOnly &&
         base->getValue<bool>(DemoBase::PAUSE))
     {
         return;
@@ -2952,7 +3617,10 @@ static void timeStep()
     ParticleData& particles = model->getParticles();
 
     const unsigned int stepsPerFrame =
-        (g_catalogRunEnabled || g_evalRunEnabled || g_evalCutsToZeroEnabled)
+        (g_catalogRunEnabled ||
+         g_evalRunEnabled ||
+         g_evalCutsToZeroEnabled ||
+         g_evalCutsToZeroOracleOnly)
             ? g_catalogStepsPerFrame
             : base->getValue<unsigned int>(DemoBase::NUM_STEPS_PER_RENDER);
     const Real dt = TimeManager::getCurrent()->getTimeStepSize();
@@ -3041,6 +3709,22 @@ static void timeStep()
                 generateNextCutEvalSeed();
                 return;
             }
+            else if (g_evalCutsToZeroOracleOnly)
+            {
+                evaluateAndRecordCutsToZeroOracleSample();
+                ++g_evalCurrentIndex;
+                if (g_evalCurrentIndex >= g_evalSeeds.size())
+                {
+                    g_evalCutsToZeroOracleOnly = false;
+                    std::cout << "[ctz-oracle] finished " << g_evalSamplesWritten
+                              << " sample(s), output=" << g_evalCutsToZeroOracleOutputPath << std::endl;
+                    MiniGL::leaveMainLoop();
+                    return;
+                }
+
+                generateNextCutEvalSeed();
+                return;
+            }
             else if (g_evalCutsToZeroEnabled)
             {
                 evaluateAndRecordCutsToZeroSample();
@@ -3070,7 +3754,8 @@ static void render()
 {
     if ((g_catalogRunEnabled && !g_catalogRenderEnabled) ||
         g_evalRunEnabled ||
-        g_evalCutsToZeroEnabled)
+        g_evalCutsToZeroEnabled ||
+        g_evalCutsToZeroOracleOnly)
     {
         return;
     }
