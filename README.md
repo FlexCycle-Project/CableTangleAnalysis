@@ -176,7 +176,7 @@ The script also sets `--creep-settle-steps=300` and lowers the creep activation 
 
 The script sets `OMP_NUM_THREADS=1` for each worker and starts a virtual X display, because batch mode still creates an OpenGL window. It runs the exhaustive single-cut oracle by default; pass `--no-oracle` to skip it. Note that seed `0` is normalized to `1` by `MyCableDemo`; use `--start 1 --end 1000` for 1000 unique seeds. Running all three creep variants takes roughly three times as long as a single variant.
 
-After the simulation stages it runs the Julia analysis in `cabletangleanalysis/`, which produces the knot-type distribution, metric histograms, normality heatmap, PCA plot, correlation heatmap and scatter pairs, cut-evaluation figures, and the complexity analysis under `analysis_julia/<variant>/`. The pooled complexity model is written to `complexity/`, and each creep variant gets its own model under `analysis_julia/<variant>/complexity/`. Set `JULIA_BIN` or `JULIA_PROJECT` if Julia is not on `PATH` or the project is elsewhere. Pass `--no-complexity` to skip the Julia pass, or `--no-complexity-per-variant` to fit only the pooled model.
+After the simulation stages it runs the Julia analysis in `cabletangleanalysis/`, which produces the knot-type distribution, PCA plot, correlation heatmap, cut-evaluation figures, and the complexity analysis under `analysis_julia/<variant>/`. The pooled complexity model is written to `complexity/`, and each creep variant gets its own model under `analysis_julia/<variant>/complexity/`. Set `JULIA_BIN` or `JULIA_PROJECT` if Julia is not on `PATH` or the project is elsewhere. Pass `--no-complexity` to skip the Julia pass, or `--no-complexity-per-variant` to fit only the pooled model.
 
 Finally, [`scripts/analyze_oracle.py`](scripts/analyze_oracle.py) analyses oracle single-cut performance against threading count and complexity score under `analysis_oracle/`. It requires Matplotlib; skip it with `--no-oracle-analysis`.
 
@@ -281,20 +281,15 @@ julia --project=cabletangleanalysis \
 ```
 
 For the reduced analysis set (knot distribution, PCA, correlation, cut-eval
-comparisons, cuts histogram, and PCA tables):
+comparisons, cuts histogram, and PCA tables), run the same script; the
+figure set is fixed and no separate core driver exists any more.
 
-```bash
-julia --project=cabletangleanalysis \
-  cabletangleanalysis/scripts/run_dataset_core.jl \
-  results/full_dataset_<timestamp> zero current high
-```
-
-The core outputs live under `analysis_julia_core/<variant>/` and include
+The outputs live under `analysis_julia/<variant>/` and include
 `tables/pca_results.tsv`, `tables/pca_scores.tsv`,
 `figures/cut_eval/cut_eval_comparison_complexity.pdf` (first-cut complexity
 reduction), and `figures/cut_eval/complexity_reduction_resolved.pdf`
 (complexity reduction after threading resolution). Both complexity plots show
-the positive and signed PC1 reductions.
+the signed PC1 reduction.
 
 ### Command-line reference
 
