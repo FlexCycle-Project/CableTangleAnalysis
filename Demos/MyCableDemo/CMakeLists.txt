@@ -33,6 +33,8 @@ add_executable(MyCableDemo
 	  CablePhysics.h
 	  TanglementAnalyzer.cpp
 	  TanglementAnalyzer.h
+	  TopologyAudit.cpp
+	  TopologyAudit.h
 	  KymoKnotAnalyzer.cpp
 	  KymoKnotAnalyzer.h
 

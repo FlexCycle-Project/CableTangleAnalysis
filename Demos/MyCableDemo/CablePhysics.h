@@ -3,6 +3,7 @@
 
 #include "Common/Common.h"
 
+#include <algorithm>
 #include <limits>
 #include <string>
 #include <utility>
@@ -98,6 +99,42 @@ struct SelfCollisionContact
     unsigned int edgeB;
 };
 
+struct SelfCollisionDiagnostics
+{
+    // Per-substep diagnostics for the self-collision solve. Counts and maxima
+    // are accumulated across all iterations of a substep; the residual fields
+    // describe the state after the final iteration (before the ground clamp).
+    size_t candidatePairCount = 0;
+    size_t penetratingContactCount = 0;
+    Real maxPenetration = static_cast<Real>(0.0);
+    Real sumPenetration = static_cast<Real>(0.0);
+    size_t correctionEndpointCount = 0;
+    size_t cappedCorrectionCount = 0;
+    Real maxAppliedCorrection = static_cast<Real>(0.0);
+    size_t normalFlipViolationCount = 0;
+    size_t residualCandidateCount = 0;
+    size_t residualPenetratingContactCount = 0;
+    Real residualMaxPenetration = static_cast<Real>(0.0);
+    Real residualSumPenetration = static_cast<Real>(0.0);
+
+    void accumulate(const SelfCollisionDiagnostics& other)
+    {
+        candidatePairCount += other.candidatePairCount;
+        penetratingContactCount += other.penetratingContactCount;
+        maxPenetration = std::max(maxPenetration, other.maxPenetration);
+        sumPenetration += other.sumPenetration;
+        correctionEndpointCount += other.correctionEndpointCount;
+        cappedCorrectionCount += other.cappedCorrectionCount;
+        maxAppliedCorrection = std::max(maxAppliedCorrection, other.maxAppliedCorrection);
+        normalFlipViolationCount += other.normalFlipViolationCount;
+        // Residuals are a snapshot of the final state, not a sum over passes.
+        residualCandidateCount = other.residualCandidateCount;
+        residualPenetratingContactCount = other.residualPenetratingContactCount;
+        residualMaxPenetration = other.residualMaxPenetration;
+        residualSumPenetration = other.residualSumPenetration;
+    }
+};
+
 struct MouseDragState
 {
     bool selected = false;
@@ -145,7 +182,9 @@ void applyMouseDragForces(
     Real spring,
     Real damping,
     Real maxAccel);
-void applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY);
+Real applyGroundConstraintToModel(
+    PBD::SimulationModel* model,
+    Real groundY);
 void applyPullForces(
     PBD::SimulationModel* model,
     Real dt,
@@ -156,7 +195,8 @@ void applySelfCollision(
     Real dt,
     const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg);
+    const SelfCollisionConfig& collisionCfg,
+    SelfCollisionDiagnostics* diagnostics = nullptr);
 std::vector<SelfCollisionContact> detectSelfCollisionContacts(
     PBD::SimulationModel* model,
     const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,

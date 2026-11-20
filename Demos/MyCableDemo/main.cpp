@@ -9,6 +9,7 @@
 #include "CableGeneration.h"
 #include "CableVisualization.h"
 #include "TanglementAnalyzer.h"
+#include "TopologyAudit.h"
 #include "KymoKnotAnalyzer.h"
 
 #include <GLFW/glfw3.h>
@@ -108,6 +109,17 @@ static bool prepareCutsToZeroEvalOutputFile();
 static bool prepareCutsToZeroOracleOutputFile();
 static void prepareCutEvalSeed(size_t index);
 static void generateNextCutEvalSeed();
+static std::string resolveDefaultTopologyAuditPrefix();
+static bool prepareTopologyAuditOutputFiles();
+static void beginTopologyAuditPhase(
+    const std::string& phase,
+    const std::vector<std::vector<Vector3r>>& pieces);
+static bool auditTopologyStep(
+    const std::vector<std::vector<Vector3r>>& pieces);
+static bool applyTopologyAuditCut();
+static void finishTopologyAuditSeed();
+static void finishTopologyAuditRun();
+static void writeTopologyAuditSummary();
 
 static DemoBase* base = nullptr;
 static AppConfig g_cfg;
@@ -159,6 +171,83 @@ struct CutEvalSeedRecord
         : knotType(type), seed(s) {}
 };
 static std::vector<CutEvalSeedRecord> g_evalSeeds;
+
+struct TopologyAuditPhaseSummary
+{
+    std::string phase;
+    unsigned int steps = 0;
+    size_t crossings = 0;
+    size_t violations = 0;
+    size_t centerlineContacts = 0;
+    size_t surfaceOverlaps = 0;
+    Real minAbsHeight = std::numeric_limits<Real>::infinity();
+    bool hasFirstViolation = false;
+    TopologyAudit::Violation firstViolation;
+    bool cutApplied = false;
+    size_t cutPiece = 0;
+    int cutEdge = -1;
+
+    // Contact/solver diagnostics accumulated over all audited substeps of the
+    // phase. "maxPenetration" and "maxGroundPenetration" are pre-correction /
+    // pre-clamp maxima (what the solver had to resolve). "residual*" fields are
+    // measured after the final self-collision iteration of each substep, before
+    // the ground clamp, and bound what remained unresolved in that discrete
+    // state.
+    size_t candidatePairCount = 0;
+    size_t penetratingContactCount = 0;
+    Real maxPenetration = static_cast<Real>(0.0);
+    Real sumPenetration = static_cast<Real>(0.0);
+    size_t correctionEndpointCount = 0;
+    size_t cappedCorrectionCount = 0;
+    Real maxAppliedCorrection = static_cast<Real>(0.0);
+    size_t normalFlipViolationCount = 0;
+    size_t residualCandidateCount = 0;
+    size_t residualPenetratingContactCount = 0;
+    Real residualMaxPenetration = static_cast<Real>(0.0);
+    Real residualSumPenetration = static_cast<Real>(0.0);
+    Real maxGroundPenetration = static_cast<Real>(0.0);
+};
+
+static bool g_topologyAuditRunEnabled = false;
+static bool g_topologyAuditActive = false;
+static bool g_topologyAuditTraceEnabled = false;
+static unsigned int g_topologyAuditSteps = 1000;
+static unsigned int g_topologyAuditMaxCuts = 0;
+static unsigned int g_topologyAuditMaxSeeds = 0;
+static unsigned int g_topologyAuditCutsApplied = 0;
+static unsigned int g_topologyAuditStepInPhase = 0;
+static std::string g_topologyAuditOutputPrefix;
+static std::ofstream g_topologyAuditSeedsOut;
+static std::ofstream g_topologyAuditEventsOut;
+static std::ofstream g_topologyAuditTraceOut;
+static std::ofstream g_topologyAuditSummaryOut;
+static TopologyAudit::Auditor g_topologyAuditor;
+static TopologyAudit::Settings g_topologyAuditSettings;
+static TopologyAuditPhaseSummary g_topologyPhase;
+static size_t g_topologyAuditTotalSeeds = 0;
+static size_t g_topologyAuditTotalPhases = 0;
+static size_t g_topologyAuditTotalSteps = 0;
+static size_t g_topologyAuditTotalViolations = 0;
+static size_t g_topologyAuditTotalCenterlineContacts = 0;
+static size_t g_topologyAuditTotalSurfaceOverlaps = 0;
+static size_t g_topologyAuditSeedsWithViolations = 0;
+static bool g_topologyAuditCurrentSeedHadViolation = false;
+static size_t g_topologyAuditTotalCandidatePairs = 0;
+static size_t g_topologyAuditTotalPenetratingContacts = 0;
+static Real g_topologyAuditMaxPenetration = static_cast<Real>(0.0);
+static Real g_topologyAuditSumPenetration = static_cast<Real>(0.0);
+static size_t g_topologyAuditTotalCappedCorrections = 0;
+static size_t g_topologyAuditTotalCorrectionEndpoints = 0;
+static Real g_topologyAuditMaxAppliedCorrection = static_cast<Real>(0.0);
+static size_t g_topologyAuditTotalNormalFlips = 0;
+static size_t g_topologyAuditTotalResidualCandidates = 0;
+static size_t g_topologyAuditTotalResidualPenetratingContacts = 0;
+static Real g_topologyAuditResidualMaxPenetration = static_cast<Real>(0.0);
+static Real g_topologyAuditResidualSumPenetration = static_cast<Real>(0.0);
+static Real g_topologyAuditMaxGroundPenetration = static_cast<Real>(0.0);
+static SelfCollisionDiagnostics g_lastSubstepCollision;
+static Real g_lastSubstepGroundPenetration = static_cast<Real>(0.0);
+
 static bool g_useMathematicalKnot = false;
 static std::string g_mathematicalKnotName = "5_2";
 bool g_pullEnabled = false;
@@ -2764,6 +2853,509 @@ static void generateNextCutEvalSeed()
     reset();
 }
 
+static std::string resolveDefaultTopologyAuditPrefix()
+{
+    const std::string catalogPath = resolveDefaultKnotSeedCatalogPath();
+    const size_t slashPos = catalogPath.find_last_of("\\/");
+    if (slashPos == std::string::npos)
+        return "topology_audit";
+
+    return catalogPath.substr(0, slashPos + 1) + "topology_audit";
+}
+
+static bool prepareTopologyAuditOutputFiles()
+{
+    if (g_topologyAuditOutputPrefix.empty())
+        g_topologyAuditOutputPrefix = resolveDefaultTopologyAuditPrefix();
+
+    const std::string seedsPath = g_topologyAuditOutputPrefix + "_seeds.tsv";
+    const std::string eventsPath = g_topologyAuditOutputPrefix + "_events.tsv";
+    const std::string summaryPath = g_topologyAuditOutputPrefix + "_summary.txt";
+
+    g_topologyAuditSeedsOut.open(seedsPath, std::ios::out | std::ios::trunc);
+    g_topologyAuditEventsOut.open(eventsPath, std::ios::out | std::ios::trunc);
+    g_topologyAuditSummaryOut.open(summaryPath, std::ios::out | std::ios::trunc);
+
+    if (!g_topologyAuditSeedsOut || !g_topologyAuditEventsOut || !g_topologyAuditSummaryOut)
+    {
+        std::cout << "[topology-audit] could not open output files under prefix "
+                  << g_topologyAuditOutputPrefix << std::endl;
+        return false;
+    }
+
+    g_topologyAuditSeedsOut
+        << "seed\tknotType\tphase\tsteps\tcutApplied\tcutPiece\tcutEdge"
+        << "\tviolations\tcenterlineContacts\tsurfaceOverlaps\tcrossingsPerStep"
+        << "\tminAbsHeight"
+        << "\tcandidatePairs\tpenetratingContacts\tmaxPenetration\tmeanPenetration"
+        << "\tresidualCandidatePairs\tresidualPenetratingContacts"
+        << "\tresidualMaxPenetration\tresidualMeanPenetration"
+        << "\tmaxGroundPenetration\tcappedCorrections\tcorrectionEndpoints"
+        << "\tmaxAppliedCorrection\tnormalFlips"
+        << "\tfirstViolationStep\tfirstViolationType"
+        << "\tfirstPieceA\tfirstEdgeA\tfirstPieceB\tfirstEdgeB"
+        << "\tfirstPreviousHeight\tfirstCurrentHeight\n";
+
+    g_topologyAuditEventsOut
+        << "seed\tknotType\tphase\tstep\ttype"
+        << "\tpieceA\tedgeA\tpieceB\tedgeB\tx\tz"
+        << "\tpreviousX\tpreviousZ"
+        << "\tpreviousHeight\tcurrentHeight"
+        << "\tcandidatePairs\tpenetratingContacts\tmaxPenetration"
+        << "\tresidualPenetratingContacts\tresidualMaxPenetration"
+        << "\tmaxGroundPenetration\tnormalFlips\n";
+
+    if (g_topologyAuditTraceEnabled)
+    {
+        const std::string tracePath = g_topologyAuditOutputPrefix + "_trace.tsv";
+        g_topologyAuditTraceOut.open(tracePath, std::ios::out | std::ios::trunc);
+        if (!g_topologyAuditTraceOut)
+        {
+            std::cout << "[topology-audit] could not open trace file "
+                      << tracePath << std::endl;
+            return false;
+        }
+
+        g_topologyAuditTraceOut
+            << "seed\tknotType\tphase\tstep\tcrossings"
+            << "\tcenterlineContacts\tsurfaceOverlaps\tminAbsHeight\tviolations"
+            << "\tcandidatePairs\tpenetratingContacts\tmaxPenetration\tmeanPenetration"
+            << "\tresidualCandidatePairs\tresidualPenetratingContacts"
+            << "\tresidualMaxPenetration\tresidualMeanPenetration"
+            << "\tmaxGroundPenetration\tcappedCorrections\tcorrectionEndpoints"
+            << "\tmaxAppliedCorrection\tnormalFlips\n";
+    }
+
+    std::cout << "[topology-audit] writing " << seedsPath
+              << ", " << eventsPath << ", " << summaryPath;
+    if (g_topologyAuditTraceEnabled)
+        std::cout << ", " << g_topologyAuditOutputPrefix << "_trace.tsv";
+    std::cout << std::endl;
+    return true;
+}
+
+static void writeTopologyAuditEvent(
+    const CutEvalSeedRecord& record,
+    const std::string& phase,
+    unsigned int step,
+    const TopologyAudit::Violation& violation)
+{
+    if (!g_topologyAuditEventsOut)
+        return;
+
+    const TopologyAudit::Crossing& crossing =
+        violation.hasCurrent ? violation.current : violation.previous;
+
+    g_topologyAuditEventsOut << std::fixed << std::setprecision(9)
+        << record.seed << '\t'
+        << record.knotType << '\t'
+        << phase << '\t'
+        << step << '\t'
+        << violation.type << '\t'
+        << crossing.pieceA << '\t'
+        << crossing.edgeA << '\t'
+        << crossing.pieceB << '\t'
+        << crossing.edgeB << '\t'
+        << crossing.x << '\t'
+        << crossing.z << '\t'
+        << (violation.hasPrevious ? violation.previous.x : static_cast<Real>(-1.0)) << '\t'
+        << (violation.hasPrevious ? violation.previous.z : static_cast<Real>(-1.0)) << '\t'
+        << violation.previousHeight << '\t'
+        << violation.currentHeight << '\t'
+        << g_lastSubstepCollision.candidatePairCount << '\t'
+        << g_lastSubstepCollision.penetratingContactCount << '\t'
+        << g_lastSubstepCollision.maxPenetration << '\t'
+        << g_lastSubstepCollision.residualPenetratingContactCount << '\t'
+        << g_lastSubstepCollision.residualMaxPenetration << '\t'
+        << g_lastSubstepGroundPenetration << '\t'
+        << g_lastSubstepCollision.normalFlipViolationCount << '\n';
+}
+
+static void beginTopologyAuditPhase(
+    const std::string& phase,
+    const std::vector<std::vector<Vector3r>>& pieces)
+{
+    if (phase == "pre_cut")
+    {
+        g_topologyAuditCurrentSeedHadViolation = false;
+        ++g_topologyAuditTotalSeeds;
+    }
+
+    g_topologyPhase = TopologyAuditPhaseSummary();
+    g_topologyPhase.phase = phase;
+    g_topologyAuditStepInPhase = 0;
+    g_topologyAuditor.begin(pieces, g_topologyAuditSettings);
+    g_topologyAuditActive = true;
+
+    const CutEvalSeedRecord& record = g_evalSeeds[g_evalCurrentIndex];
+    std::cout << "[topology-audit] seed=" << record.seed
+              << " knotType=" << record.knotType
+              << " phase=" << phase
+              << " steps=" << g_topologyAuditSteps
+              << " cutStep=" << g_topologyAuditCutsApplied
+              << std::endl;
+}
+
+static void finishTopologyAuditPhaseRow(const CutEvalSeedRecord& record)
+{
+    if (!g_topologyAuditSeedsOut)
+        return;
+
+    const Real crossingsPerStep =
+        g_topologyPhase.steps == 0
+            ? static_cast<Real>(0.0)
+            : static_cast<Real>(g_topologyPhase.crossings) /
+                  static_cast<Real>(g_topologyPhase.steps);
+
+    const Real meanPenetration =
+        (g_topologyPhase.penetratingContactCount > 0)
+            ? g_topologyPhase.sumPenetration /
+                  static_cast<Real>(g_topologyPhase.penetratingContactCount)
+            : static_cast<Real>(0.0);
+    const Real residualMeanPenetration =
+        (g_topologyPhase.residualPenetratingContactCount > 0)
+            ? g_topologyPhase.residualSumPenetration /
+                  static_cast<Real>(g_topologyPhase.residualPenetratingContactCount)
+            : static_cast<Real>(0.0);
+
+    g_topologyAuditSeedsOut << std::fixed << std::setprecision(9)
+        << record.seed << '\t'
+        << record.knotType << '\t'
+        << g_topologyPhase.phase << '\t'
+        << g_topologyPhase.steps << '\t'
+        << (g_topologyPhase.cutApplied ? 1 : 0) << '\t'
+        << static_cast<long long>(g_topologyPhase.cutPiece) << '\t'
+        << g_topologyPhase.cutEdge << '\t'
+        << g_topologyPhase.violations << '\t'
+        << g_topologyPhase.centerlineContacts << '\t'
+        << g_topologyPhase.surfaceOverlaps << '\t'
+        << crossingsPerStep << '\t'
+        << (std::isfinite(g_topologyPhase.minAbsHeight)
+                ? g_topologyPhase.minAbsHeight
+                : static_cast<Real>(-1.0))
+        << '\t'
+        << g_topologyPhase.candidatePairCount << '\t'
+        << g_topologyPhase.penetratingContactCount << '\t'
+        << g_topologyPhase.maxPenetration << '\t'
+        << meanPenetration << '\t'
+        << g_topologyPhase.residualCandidateCount << '\t'
+        << g_topologyPhase.residualPenetratingContactCount << '\t'
+        << g_topologyPhase.residualMaxPenetration << '\t'
+        << residualMeanPenetration << '\t'
+        << g_topologyPhase.maxGroundPenetration << '\t'
+        << g_topologyPhase.cappedCorrectionCount << '\t'
+        << g_topologyPhase.correctionEndpointCount << '\t'
+        << g_topologyPhase.maxAppliedCorrection << '\t'
+        << g_topologyPhase.normalFlipViolationCount
+        << '\t';
+
+    if (g_topologyPhase.hasFirstViolation)
+    {
+        const TopologyAudit::Violation& first = g_topologyPhase.firstViolation;
+        const TopologyAudit::Crossing& crossing =
+            first.hasCurrent ? first.current : first.previous;
+        g_topologyAuditSeedsOut
+            << first.step << '\t'
+            << first.type << '\t'
+            << crossing.pieceA << '\t'
+            << crossing.edgeA << '\t'
+            << crossing.pieceB << '\t'
+            << crossing.edgeB << '\t'
+            << first.previousHeight << '\t'
+            << first.currentHeight;
+    }
+    else
+    {
+        g_topologyAuditSeedsOut
+            << -1 << '\t'
+            << "none" << '\t'
+            << -1 << '\t'
+            << -1 << '\t'
+            << -1 << '\t'
+            << -1 << '\t'
+            << 0.0 << '\t'
+            << 0.0;
+    }
+
+    g_topologyAuditSeedsOut << '\n';
+}
+
+static bool auditTopologyStep(
+    const std::vector<std::vector<Vector3r>>& pieces)
+{
+    if (!g_topologyAuditActive)
+        return false;
+
+    const CutEvalSeedRecord& record = g_evalSeeds[g_evalCurrentIndex];
+    const TopologyAudit::StepResult result =
+        g_topologyAuditor.audit(g_topologyAuditStepInPhase, pieces);
+
+    ++g_topologyPhase.steps;
+    g_topologyPhase.crossings += result.crossingCount;
+    g_topologyPhase.violations += result.violations.size();
+    g_topologyPhase.centerlineContacts += result.centerlineContactCount;
+    g_topologyPhase.surfaceOverlaps += result.surfaceOverlapCount;
+    if (std::isfinite(result.minAbsHeight))
+        g_topologyPhase.minAbsHeight =
+            std::min(g_topologyPhase.minAbsHeight, result.minAbsHeight);
+
+    // Solver/contact diagnostics captured for the substep that just executed.
+    const SelfCollisionDiagnostics& diag = g_lastSubstepCollision;
+    g_topologyPhase.candidatePairCount += diag.candidatePairCount;
+    g_topologyPhase.penetratingContactCount += diag.penetratingContactCount;
+    g_topologyPhase.maxPenetration = std::max(g_topologyPhase.maxPenetration, diag.maxPenetration);
+    g_topologyPhase.sumPenetration += diag.sumPenetration;
+    g_topologyPhase.correctionEndpointCount += diag.correctionEndpointCount;
+    g_topologyPhase.cappedCorrectionCount += diag.cappedCorrectionCount;
+    g_topologyPhase.maxAppliedCorrection =
+        std::max(g_topologyPhase.maxAppliedCorrection, diag.maxAppliedCorrection);
+    g_topologyPhase.normalFlipViolationCount += diag.normalFlipViolationCount;
+    g_topologyPhase.residualCandidateCount += diag.residualCandidateCount;
+    g_topologyPhase.residualPenetratingContactCount += diag.residualPenetratingContactCount;
+    g_topologyPhase.residualMaxPenetration =
+        std::max(g_topologyPhase.residualMaxPenetration, diag.residualMaxPenetration);
+    g_topologyPhase.residualSumPenetration += diag.residualSumPenetration;
+    g_topologyPhase.maxGroundPenetration =
+        std::max(g_topologyPhase.maxGroundPenetration, g_lastSubstepGroundPenetration);
+
+    ++g_topologyAuditTotalSteps;
+    g_topologyAuditTotalViolations += result.violations.size();
+    g_topologyAuditTotalCenterlineContacts += result.centerlineContactCount;
+    g_topologyAuditTotalSurfaceOverlaps += result.surfaceOverlapCount;
+    g_topologyAuditTotalCandidatePairs += diag.candidatePairCount;
+    g_topologyAuditTotalPenetratingContacts += diag.penetratingContactCount;
+    g_topologyAuditMaxPenetration = std::max(g_topologyAuditMaxPenetration, diag.maxPenetration);
+    g_topologyAuditSumPenetration += diag.sumPenetration;
+    g_topologyAuditTotalCappedCorrections += diag.cappedCorrectionCount;
+    g_topologyAuditTotalCorrectionEndpoints += diag.correctionEndpointCount;
+    g_topologyAuditMaxAppliedCorrection =
+        std::max(g_topologyAuditMaxAppliedCorrection, diag.maxAppliedCorrection);
+    g_topologyAuditTotalNormalFlips += diag.normalFlipViolationCount;
+    g_topologyAuditTotalResidualCandidates += diag.residualCandidateCount;
+    g_topologyAuditTotalResidualPenetratingContacts += diag.residualPenetratingContactCount;
+    g_topologyAuditResidualMaxPenetration =
+        std::max(g_topologyAuditResidualMaxPenetration, diag.residualMaxPenetration);
+    g_topologyAuditResidualSumPenetration += diag.residualSumPenetration;
+    g_topologyAuditMaxGroundPenetration =
+        std::max(g_topologyAuditMaxGroundPenetration, g_lastSubstepGroundPenetration);
+
+    if (!result.violations.empty())
+    {
+        g_topologyAuditCurrentSeedHadViolation = true;
+        if (!g_topologyPhase.hasFirstViolation)
+        {
+            g_topologyPhase.hasFirstViolation = true;
+            g_topologyPhase.firstViolation = result.violations.front();
+        }
+
+        for (const TopologyAudit::Violation& violation : result.violations)
+            writeTopologyAuditEvent(record, g_topologyPhase.phase, g_topologyAuditStepInPhase, violation);
+    }
+
+    if (g_topologyAuditTraceOut)
+    {
+        const Real traceMeanPen = (diag.penetratingContactCount > 0)
+            ? diag.sumPenetration / static_cast<Real>(diag.penetratingContactCount)
+            : static_cast<Real>(0.0);
+        const Real traceResidualMeanPen = (diag.residualPenetratingContactCount > 0)
+            ? diag.residualSumPenetration / static_cast<Real>(diag.residualPenetratingContactCount)
+            : static_cast<Real>(0.0);
+        g_topologyAuditTraceOut << std::fixed << std::setprecision(9)
+            << record.seed << '\t'
+            << record.knotType << '\t'
+            << g_topologyPhase.phase << '\t'
+            << g_topologyAuditStepInPhase << '\t'
+            << result.crossingCount << '\t'
+            << result.centerlineContactCount << '\t'
+            << result.surfaceOverlapCount << '\t'
+            << (std::isfinite(result.minAbsHeight)
+                    ? result.minAbsHeight
+                    : static_cast<Real>(-1.0))
+            << '\t'
+            << result.violations.size() << '\t'
+            << diag.candidatePairCount << '\t'
+            << diag.penetratingContactCount << '\t'
+            << diag.maxPenetration << '\t'
+            << traceMeanPen << '\t'
+            << diag.residualCandidateCount << '\t'
+            << diag.residualPenetratingContactCount << '\t'
+            << diag.residualMaxPenetration << '\t'
+            << traceResidualMeanPen << '\t'
+            << g_lastSubstepGroundPenetration << '\t'
+            << diag.cappedCorrectionCount << '\t'
+            << diag.correctionEndpointCount << '\t'
+            << diag.maxAppliedCorrection << '\t'
+            << diag.normalFlipViolationCount << '\n';
+    }
+
+    ++g_topologyAuditStepInPhase;
+    if (g_topologyAuditStepInPhase < g_topologyAuditSteps)
+        return false;
+
+    g_topologyAuditActive = false;
+    finishTopologyAuditPhaseRow(record);
+    ++g_topologyAuditTotalPhases;
+
+    std::cout << "[topology-audit] seed=" << record.seed
+              << " phase=" << g_topologyPhase.phase
+              << " steps=" << g_topologyPhase.steps
+              << " violations=" << g_topologyPhase.violations
+              << " contacts=" << g_topologyPhase.centerlineContacts
+              << " minAbsHeight=" << g_topologyPhase.minAbsHeight
+              << " maxPenetration=" << g_topologyPhase.maxPenetration
+              << " residualMaxPenetration=" << g_topologyPhase.residualMaxPenetration
+              << std::endl;
+    return true;
+}
+
+static bool applyTopologyAuditCut()
+{
+    SimulationModel* model = Simulation::getCurrent()->getModel();
+    if (model == nullptr)
+        return false;
+
+    std::vector<std::vector<Vector3r>> pieces = collectCurrentCablePieces(model);
+    if (pieces.empty())
+        return false;
+
+    const TanglementAnalyzer::TanglementAnalysisResult tanglement =
+        TanglementAnalyzer::analyzeTanglementGeometryOnly(
+            pieces,
+            {},
+            g_cfg.rope,
+            g_cfg.selfCollision);
+    const int threading =
+        TanglementAnalyzer::computeThreadingMetrics(tanglement).totalThreadingCount;
+    if (threading == 0)
+    {
+        std::cout << "[topology-audit] seed=" << g_evalSeeds[g_evalCurrentIndex].seed
+                  << " has no remaining threading; no further cut applied" << std::endl;
+        return false;
+    }
+
+    const VirtualCutTarget target = findBestHoopMidpointCut(tanglement, pieces);
+    if (!target.valid ||
+        !splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
+    {
+        std::cout << "[topology-audit] no valid heuristic cut for seed="
+                  << g_evalSeeds[g_evalCurrentIndex].seed
+                  << " (threading=" << threading << ")" << std::endl;
+        return false;
+    }
+
+    g_cablePieces = std::move(pieces);
+    g_mouseDrag = MouseDragState();
+    g_hoopMarkerSelection = CableVisualization::HoopMarkerSelection();
+    g_cachedCableKymoKnotResults.clear();
+    g_hasCableKymoKnotResults = false;
+    g_visualizationState.clear();
+
+    ++g_topologyAuditCutsApplied;
+    std::cout << "[topology-audit] cut seed=" << g_evalSeeds[g_evalCurrentIndex].seed
+              << " piece=" << target.pieceIndex
+              << " edge=" << target.edgeIndex
+              << " cutStep=" << g_topologyAuditCutsApplied << std::endl;
+
+    model->cleanup();
+    buildModel();
+
+    const std::vector<std::vector<Vector3r>> afterCut =
+        collectCurrentCablePieces(model);
+    const std::string phase =
+        "post_cut_" + std::to_string(g_topologyAuditCutsApplied);
+    beginTopologyAuditPhase(phase, afterCut);
+    g_topologyPhase.cutApplied = true;
+    g_topologyPhase.cutPiece = target.pieceIndex;
+    g_topologyPhase.cutEdge = target.edgeIndex;
+    return true;
+}
+
+static void writeTopologyAuditSummary()
+{
+    if (!g_topologyAuditSummaryOut)
+        return;
+
+    const Real meanPenetration =
+        (g_topologyAuditTotalPenetratingContacts > 0)
+            ? g_topologyAuditSumPenetration /
+                  static_cast<Real>(g_topologyAuditTotalPenetratingContacts)
+            : static_cast<Real>(0.0);
+    const Real residualMeanPenetration =
+        (g_topologyAuditTotalResidualPenetratingContacts > 0)
+            ? g_topologyAuditResidualSumPenetration /
+                  static_cast<Real>(g_topologyAuditTotalResidualPenetratingContacts)
+            : static_cast<Real>(0.0);
+
+    g_topologyAuditSummaryOut << std::setprecision(17)
+        << "seeds=" << g_topologyAuditTotalSeeds << '\n'
+        << "phases=" << g_topologyAuditTotalPhases << '\n'
+        << "steps=" << g_topologyAuditTotalSteps << '\n'
+        << "violations=" << g_topologyAuditTotalViolations << '\n'
+        << "centerline_contacts=" << g_topologyAuditTotalCenterlineContacts << '\n'
+        << "surface_overlaps=" << g_topologyAuditTotalSurfaceOverlaps << '\n'
+        << "seeds_with_violations=" << g_topologyAuditSeedsWithViolations << '\n'
+        << "candidate_pairs=" << g_topologyAuditTotalCandidatePairs << '\n'
+        << "penetrating_contacts=" << g_topologyAuditTotalPenetratingContacts << '\n'
+        << "max_penetration=" << g_topologyAuditMaxPenetration << '\n'
+        << "mean_penetration=" << meanPenetration << '\n'
+        << "residual_candidate_pairs=" << g_topologyAuditTotalResidualCandidates << '\n'
+        << "residual_penetrating_contacts=" << g_topologyAuditTotalResidualPenetratingContacts << '\n'
+        << "residual_max_penetration=" << g_topologyAuditResidualMaxPenetration << '\n'
+        << "residual_mean_penetration=" << residualMeanPenetration << '\n'
+        << "max_ground_penetration=" << g_topologyAuditMaxGroundPenetration << '\n'
+        << "capped_corrections=" << g_topologyAuditTotalCappedCorrections << '\n'
+        << "correction_endpoints=" << g_topologyAuditTotalCorrectionEndpoints << '\n'
+        << "max_applied_correction=" << g_topologyAuditMaxAppliedCorrection << '\n'
+        << "normal_flips=" << g_topologyAuditTotalNormalFlips << '\n'
+        << "collision_iterations=" << g_cfg.selfCollision.iterations << '\n'
+        << "collision_compliance=" << static_cast<double>(g_cfg.selfCollision.compliance) << '\n'
+        << "collision_max_correction=" << static_cast<double>(g_cfg.selfCollision.maxCorrection) << '\n'
+        << "normal_damping=" << static_cast<double>(g_cfg.selfCollision.normalDamping) << '\n'
+        << "tangential_damping=" << static_cast<double>(g_cfg.selfCollision.tangentialDamping) << '\n'
+        << "hash_cell_size=" << static_cast<double>(g_cfg.selfCollision.hashCellSize) << '\n'
+        << "dt=" << static_cast<double>(g_cfg.physics.timeStep) << '\n'
+        << "creep=" << static_cast<double>(g_cfg.restCreep.creep) << '\n';
+}
+
+static void finishTopologyAuditRun()
+{
+    g_topologyAuditActive = false;
+    g_topologyAuditRunEnabled = false;
+    writeTopologyAuditSummary();
+    std::cout << "[topology-audit] finished seeds=" << g_topologyAuditTotalSeeds
+              << " phases=" << g_topologyAuditTotalPhases
+              << " steps=" << g_topologyAuditTotalSteps
+              << " violations=" << g_topologyAuditTotalViolations
+              << " seedsWithViolations=" << g_topologyAuditSeedsWithViolations
+              << " maxPenetration=" << g_topologyAuditMaxPenetration
+              << " residualMaxPenetration=" << g_topologyAuditResidualMaxPenetration
+              << " maxGroundPenetration=" << g_topologyAuditMaxGroundPenetration
+              << std::endl;
+    MiniGL::leaveMainLoop();
+}
+
+static void finishTopologyAuditSeed()
+{
+    g_topologyAuditActive = false;
+
+    if (g_topologyAuditCurrentSeedHadViolation)
+        ++g_topologyAuditSeedsWithViolations;
+
+    ++g_evalCurrentIndex;
+    g_topologyAuditCutsApplied = 0;
+
+    if (g_evalCurrentIndex >= g_evalSeeds.size())
+    {
+        finishTopologyAuditRun();
+        return;
+    }
+
+    std::cout << "[topology-audit] next seed=" << g_evalSeeds[g_evalCurrentIndex].seed
+              << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
+              << std::endl;
+    generateNextCutEvalSeed();
+}
+
 int main(int argc, char** argv)
 {
     base = new DemoBase();
@@ -2939,6 +3531,139 @@ int main(int argc, char** argv)
                 g_evalCutsToZeroRandomTrials = 20;
             }
         }
+        else if (arg == "--topology-audit-run")
+        {
+            g_topologyAuditRunEnabled = true;
+        }
+        else if (arg == "--topology-audit-trace")
+        {
+            g_topologyAuditTraceEnabled = true;
+        }
+        else if (arg.rfind("--topology-audit-steps=", 0) == 0)
+        {
+            try
+            {
+                g_topologyAuditSteps = std::max(
+                    1u,
+                    static_cast<unsigned int>(
+                        std::stoul(arg.substr(std::string("--topology-audit-steps=").size()))));
+            }
+            catch (...)
+            {
+                g_topologyAuditSteps = 1000;
+            }
+        }
+        else if (arg.rfind("--topology-audit-cuts=", 0) == 0)
+        {
+            try
+            {
+                g_topologyAuditMaxCuts = static_cast<unsigned int>(
+                    std::stoul(arg.substr(std::string("--topology-audit-cuts=").size())));
+            }
+            catch (...)
+            {
+                g_topologyAuditMaxCuts = 0;
+            }
+        }
+        else if (arg.rfind("--topology-audit-max-seeds=", 0) == 0)
+        {
+            try
+            {
+                g_topologyAuditMaxSeeds = static_cast<unsigned int>(
+                    std::stoul(arg.substr(std::string("--topology-audit-max-seeds=").size())));
+            }
+            catch (...)
+            {
+                g_topologyAuditMaxSeeds = 0;
+            }
+        }
+        else if (arg.rfind("--topology-audit-output=", 0) == 0)
+        {
+            g_topologyAuditOutputPrefix =
+                arg.substr(std::string("--topology-audit-output=").size());
+        }
+        else if (arg.rfind("--topology-audit-contact-eps=", 0) == 0)
+        {
+            try
+            {
+                g_topologyAuditSettings.contactEpsilon = static_cast<Real>(
+                    std::stod(arg.substr(std::string("--topology-audit-contact-eps=").size())));
+            }
+            catch (...)
+            {
+                g_topologyAuditSettings.contactEpsilon = static_cast<Real>(1e-4);
+            }
+        }
+        else if (arg.rfind("--dt=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.physics.timeStep = std::max(
+                    static_cast<Real>(1e-5),
+                    static_cast<Real>(std::stod(arg.substr(5))));
+            }
+            catch (...) {}
+        }
+        else if (arg.rfind("--collision-iterations=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.selfCollision.iterations = std::max(
+                    1u,
+                    static_cast<unsigned int>(std::stoul(arg.substr(23))));
+            }
+            catch (...) {}
+        }
+        else if (arg.rfind("--collision-compliance=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.selfCollision.compliance = std::max(
+                    static_cast<Real>(0.0),
+                    static_cast<Real>(std::stod(arg.substr(23))));
+            }
+            catch (...) {}
+        }
+        else if (arg.rfind("--collision-max-correction=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.selfCollision.maxCorrection = std::max(
+                    static_cast<Real>(0.0),
+                    static_cast<Real>(std::stod(arg.substr(27))));
+            }
+            catch (...) {}
+        }
+        else if (arg.rfind("--tangential-damping=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.selfCollision.tangentialDamping = std::max(
+                    static_cast<Real>(0.0),
+                    static_cast<Real>(std::stod(arg.substr(21))));
+            }
+            catch (...) {}
+        }
+        else if (arg.rfind("--normal-damping=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.selfCollision.normalDamping = std::max(
+                    static_cast<Real>(0.0),
+                    static_cast<Real>(std::stod(arg.substr(17))));
+            }
+            catch (...) {}
+        }
+        else if (arg.rfind("--hash-cell-size=", 0) == 0)
+        {
+            try
+            {
+                g_cfg.selfCollision.hashCellSize = std::max(
+                    static_cast<Real>(1e-6),
+                    static_cast<Real>(std::stod(arg.substr(17))));
+            }
+            catch (...) {}
+        }
         else if (arg == "--catalog-run")
         {
             g_catalogRunEnabled = true;
@@ -3113,6 +3838,64 @@ int main(int argc, char** argv)
                       << " randomTrials=" << g_evalCutsToZeroRandomTrials
                       << " output=" << g_evalCutsToZeroOutputPath << std::endl;
         }
+    }
+
+    if (g_topologyAuditRunEnabled)
+    {
+        g_catalogRunEnabled = false;
+        g_catalogRenderEnabled = false;
+        g_evalRunEnabled = false;
+        g_evalCutsToZeroEnabled = false;
+        g_evalCutsToZeroOracleOnly = false;
+
+        if (!loadCutEvalCatalog() || !prepareTopologyAuditOutputFiles())
+        {
+            std::cerr << "[topology-audit] setup failed; exiting instead of entering "
+                         "the interactive loop" << std::endl;
+            std::exit(EXIT_FAILURE);
+        }
+
+        if (g_topologyAuditMaxSeeds > 0 && g_evalSeeds.size() > g_topologyAuditMaxSeeds)
+            g_evalSeeds.resize(g_topologyAuditMaxSeeds);
+
+        prepareCutEvalSeed(0);
+        g_topologyAuditCutsApplied = 0;
+        g_topologyAuditTotalSeeds = 0;
+        g_topologyAuditTotalPhases = 0;
+        g_topologyAuditTotalSteps = 0;
+        g_topologyAuditTotalViolations = 0;
+        g_topologyAuditTotalCenterlineContacts = 0;
+        g_topologyAuditTotalSurfaceOverlaps = 0;
+        g_topologyAuditSeedsWithViolations = 0;
+        g_topologyAuditCurrentSeedHadViolation = false;
+        g_topologyAuditTotalCandidatePairs = 0;
+        g_topologyAuditTotalPenetratingContacts = 0;
+        g_topologyAuditMaxPenetration = static_cast<Real>(0.0);
+        g_topologyAuditSumPenetration = static_cast<Real>(0.0);
+        g_topologyAuditTotalCappedCorrections = 0;
+        g_topologyAuditTotalCorrectionEndpoints = 0;
+        g_topologyAuditMaxAppliedCorrection = static_cast<Real>(0.0);
+        g_topologyAuditTotalNormalFlips = 0;
+        g_topologyAuditTotalResidualCandidates = 0;
+        g_topologyAuditTotalResidualPenetratingContacts = 0;
+        g_topologyAuditResidualMaxPenetration = static_cast<Real>(0.0);
+        g_topologyAuditResidualSumPenetration = static_cast<Real>(0.0);
+        g_topologyAuditMaxGroundPenetration = static_cast<Real>(0.0);
+        g_lastSubstepCollision = SelfCollisionDiagnostics();
+        g_lastSubstepGroundPenetration = static_cast<Real>(0.0);
+
+        std::cout << "[topology-audit] running unattended topology audit"
+                  << " seed=" << g_cfg.randomCable.seed
+                  << " samples=" << g_evalSeeds.size()
+                  << " stepsPerPhase=" << g_topologyAuditSteps
+                  << " cutsPerSeed=" << g_topologyAuditMaxCuts
+                  << " contactEps=" << g_topologyAuditSettings.contactEpsilon
+                  << " dt=" << g_cfg.physics.timeStep
+                  << " collisionIterations=" << g_cfg.selfCollision.iterations
+                  << " compliance=" << g_cfg.selfCollision.compliance
+                  << " tangentialDamping=" << g_cfg.selfCollision.tangentialDamping
+                  << " creep=" << g_cfg.restCreep.creep
+                  << std::endl;
     }
 
     if (g_catalogRunEnabled)
@@ -3608,6 +4391,7 @@ static void timeStep()
         !g_evalRunEnabled &&
         !g_evalCutsToZeroEnabled &&
         !g_evalCutsToZeroOracleOnly &&
+        !g_topologyAuditRunEnabled &&
         base->getValue<bool>(DemoBase::PAUSE))
     {
         return;
@@ -3620,7 +4404,8 @@ static void timeStep()
         (g_catalogRunEnabled ||
          g_evalRunEnabled ||
          g_evalCutsToZeroEnabled ||
-         g_evalCutsToZeroOracleOnly)
+         g_evalCutsToZeroOracleOnly ||
+         g_topologyAuditRunEnabled)
             ? g_catalogStepsPerFrame
             : base->getValue<unsigned int>(DemoBase::NUM_STEPS_PER_RENDER);
     const Real dt = TimeManager::getCurrent()->getTimeStepSize();
@@ -3641,6 +4426,12 @@ static void timeStep()
 
         Simulation::getCurrent()->getTimeStep()->step(*model);
 
+        // Per-substep contact/solver diagnostics. Penetration and normal-flip
+        // counts accumulate across all collision iterations; residual fields are
+        // measured after the final iteration, before the ground clamp.
+        SelfCollisionDiagnostics substepCollision;
+        Real substepGroundPenetration = static_cast<Real>(0.0);
+
         if (g_cfg.selfCollision.enabled)
         {
             std::vector<Vector3r> oldPositions(particles.getNumberOfParticles());
@@ -3648,14 +4439,20 @@ static void timeStep()
                 oldPositions[i] = particles.getPosition(i);
 
             for (unsigned int k = 0; k < g_cfg.selfCollision.iterations; ++k)
+            {
+                SelfCollisionDiagnostics iterDiag;
                 applySelfCollision(
                     model,
                     dt,
                     g_cablePieceRanges,
                     g_cfg.rope,
-                    g_cfg.selfCollision);
+                    g_cfg.selfCollision,
+                    &iterDiag);
+                substepCollision.accumulate(iterDiag);
+            }
 
-            applyGroundConstraintToModel(model, g_cfg.groundY);
+            substepGroundPenetration =
+                applyGroundConstraintToModel(model, g_cfg.groundY);
 
             recomputeVelocitiesFromPositions(
                 model,
@@ -3665,19 +4462,28 @@ static void timeStep()
         }
         else
         {
-            applyGroundConstraintToModel(model, g_cfg.groundY);
+            substepGroundPenetration =
+                applyGroundConstraintToModel(model, g_cfg.groundY);
         }
 
         applyBendTwistRestStateCreep(model, g_cfg.restCreep, g_restCreepCounter);
 
         base->step();
+        g_lastSubstepCollision = substepCollision;
+        g_lastSubstepGroundPenetration = substepGroundPenetration;
         if (!g_autoKnotEvaluationDone &&
             g_cfg.restCreep.enabled &&
             g_restCreepCounter >=
                 g_cfg.restCreep.activationDelaySteps + g_cfg.restCreep.evaluationDelaySteps)
         {
             g_autoKnotEvaluationDone = true;
-            if (g_catalogRunEnabled)
+            if (g_topologyAuditRunEnabled)
+            {
+                const std::vector<std::vector<Vector3r>> settledPieces =
+                    collectCurrentCablePieces(model);
+                beginTopologyAuditPhase("pre_cut", settledPieces);
+            }
+            else if (g_catalogRunEnabled)
             {
                 evaluateAndRecordCatalogSample(false);
                 if (g_catalogMaxSamples > 0 && g_catalogSamplesWritten >= g_catalogMaxSamples)
@@ -3747,6 +4553,25 @@ static void timeStep()
                     evaluateCurrentCableTanglement(true);
             }
         }
+
+        if (g_topologyAuditActive)
+        {
+            const std::vector<std::vector<Vector3r>> currentPieces =
+                collectCurrentCablePieces(model);
+            if (auditTopologyStep(currentPieces))
+            {
+                if (g_topologyAuditCutsApplied < g_topologyAuditMaxCuts)
+                {
+                    if (!applyTopologyAuditCut())
+                        finishTopologyAuditSeed();
+                }
+                else
+                {
+                    finishTopologyAuditSeed();
+                }
+                return;
+            }
+        }
     }
 }
 
@@ -3755,7 +4580,8 @@ static void render()
     if ((g_catalogRunEnabled && !g_catalogRenderEnabled) ||
         g_evalRunEnabled ||
         g_evalCutsToZeroEnabled ||
-        g_evalCutsToZeroOracleOnly)
+        g_evalCutsToZeroOracleOnly ||
+        g_topologyAuditRunEnabled)
     {
         return;
     }

@@ -390,15 +390,20 @@ void applyMouseDragForces(
     particles.getVelocity(i1) += dt * w1 * acceleration;
 }
 
-void applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY)
+Real applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY)
 {
     if (model == nullptr)
-        return;
+        return static_cast<Real>(0.0);
 
+    Real maxPenetration = static_cast<Real>(0.0);
     PBD::ParticleData& particles = model->getParticles();
     for (unsigned int i = 0; i < particles.getNumberOfParticles(); ++i)
     {
         Vector3r p = particles.getPosition(i);
+        const Real penetration = groundY - p.y();
+        if (penetration > maxPenetration)
+            maxPenetration = penetration;
+
         if (p.y() < groundY)
         {
             p.y() = groundY;
@@ -409,6 +414,7 @@ void applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY)
                 v.y() = 0.0;
         }
     }
+    return maxPenetration;
 }
 
 static std::vector<CableEdgeRef> collectCableEdges(
@@ -787,7 +793,8 @@ void applySelfCollision(
     Real dt,
     const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
     const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg)
+    const SelfCollisionConfig& collisionCfg,
+    SelfCollisionDiagnostics* diagnostics)
 {
     ParticleData& pd = model->getParticles();
     const unsigned int n = pd.getNumberOfParticles();
@@ -832,6 +839,17 @@ void applySelfCollision(
             minDist,
             collisionCfg.hashCellSize);
 
+    // Candidate pairs are broad-phase pairs after arc-length/adjacency
+    // filtering. Penetration statistics are computed in this narrow-phase
+    // loop, before any compliant, capped, averaged correction is applied.
+    size_t candidatePairCount = 0;
+    size_t penetratingContactCount = 0;
+    Real maxPenetration = static_cast<Real>(0.0);
+    Real sumPenetration = static_cast<Real>(0.0);
+    size_t correctionEndpointCount = 0;
+    size_t cappedCorrectionCount = 0;
+    Real maxAppliedCorrection = static_cast<Real>(0.0);
+
     for (const auto& pair : candidates)
     {
         const CableEdgeRef& edgeA = edgeRefs[pair.first];
@@ -853,6 +871,8 @@ void applySelfCollision(
 
         if (i + 1 >= n || j + 1 >= n)
             continue;
+
+        ++candidatePairCount;
 
         const unsigned int i0 = i;
         const unsigned int i1 = i + 1;
@@ -894,6 +914,12 @@ void applySelfCollision(
         if (C >= static_cast<Real>(0.0))
             continue;
 
+        const Real penetration = -C;
+        ++penetratingContactCount;
+        sumPenetration += penetration;
+        if (penetration > maxPenetration)
+            maxPenetration = penetration;
+
         const std::uint64_t contactKey = makeEdgePairKey(i, j);
         const auto previousNormalIt = previousContactNormals.find(contactKey);
         if (previousNormalIt != previousContactNormals.end())
@@ -928,10 +954,29 @@ void applySelfCollision(
         // the constraint gradient direction; alpha softens the contact.
         const Real deltaLambda = -C / denom;
 
-        Vector3r dp0 = clampVec(deltaLambda * gradP0, collisionCfg.maxCorrection);
-        Vector3r dp1 = clampVec(deltaLambda * gradP1, collisionCfg.maxCorrection);
-        Vector3r dq0 = clampVec(deltaLambda * gradQ0, collisionCfg.maxCorrection);
-        Vector3r dq1 = clampVec(deltaLambda * gradQ1, collisionCfg.maxCorrection);
+        const Vector3r rawDp0 = deltaLambda * gradP0;
+        const Vector3r rawDp1 = deltaLambda * gradP1;
+        const Vector3r rawDq0 = deltaLambda * gradQ0;
+        const Vector3r rawDq1 = deltaLambda * gradQ1;
+        Vector3r dp0 = clampVec(rawDp0, collisionCfg.maxCorrection);
+        Vector3r dp1 = clampVec(rawDp1, collisionCfg.maxCorrection);
+        Vector3r dq0 = clampVec(rawDq0, collisionCfg.maxCorrection);
+        Vector3r dq1 = clampVec(rawDq1, collisionCfg.maxCorrection);
+
+        correctionEndpointCount += 4;
+        if (dp0.squaredNorm() + static_cast<Real>(1e-18) < rawDp0.squaredNorm())
+            ++cappedCorrectionCount;
+        if (dp1.squaredNorm() + static_cast<Real>(1e-18) < rawDp1.squaredNorm())
+            ++cappedCorrectionCount;
+        if (dq0.squaredNorm() + static_cast<Real>(1e-18) < rawDq0.squaredNorm())
+            ++cappedCorrectionCount;
+        if (dq1.squaredNorm() + static_cast<Real>(1e-18) < rawDq1.squaredNorm())
+            ++cappedCorrectionCount;
+
+        maxAppliedCorrection = std::max(maxAppliedCorrection, dp0.norm());
+        maxAppliedCorrection = std::max(maxAppliedCorrection, dp1.norm());
+        maxAppliedCorrection = std::max(maxAppliedCorrection, dq0.norm());
+        maxAppliedCorrection = std::max(maxAppliedCorrection, dq1.norm());
 
         posDelta[i0] += dp0;
         contactCount[i0] += 1;
@@ -993,6 +1038,69 @@ void applySelfCollision(
             if (collisionCfg.tangentialDamping > static_cast<Real>(0.0))
                 applyImpulse(-collisionCfg.tangentialDamping * vt);
         }
+    }
+
+    // Residual penetration after all position and velocity corrections of this
+    // iteration, measured on the current positions. This is the quantity that
+    // bounds what could still be missed by a single discrete pass.
+    size_t residualCandidateCount = 0;
+    size_t residualPenetratingContactCount = 0;
+    Real residualMaxPenetration = static_cast<Real>(0.0);
+    Real residualSumPenetration = static_cast<Real>(0.0);
+    if (diagnostics != nullptr)
+    {
+        for (const auto& pair : candidates)
+        {
+            const CableEdgeRef& edgeA = edgeRefs[pair.first];
+            const CableEdgeRef& edgeB = edgeRefs[pair.second];
+            if (edgeA.pieceIndex == edgeB.pieceIndex)
+            {
+                const Real arcDist =
+                    static_cast<Real>(
+                        std::abs(
+                            static_cast<int>(edgeB.localEdgeIndex) -
+                            static_cast<int>(edgeA.localEdgeIndex))) *
+                    ropeCfg.dx;
+                if (arcDist < collisionCfg.excludeArcLength)
+                    continue;
+            }
+
+            const unsigned int i0 = edgeA.startParticle;
+            const unsigned int j0 = edgeB.startParticle;
+            if (i0 + 1 >= n || j0 + 1 >= n)
+                continue;
+
+            ++residualCandidateCount;
+
+            Real s, t;
+            Vector3r c1, c2;
+            closestPtSegmentSegment(
+                pd.getPosition(i0), pd.getPosition(i0 + 1),
+                pd.getPosition(j0), pd.getPosition(j0 + 1),
+                s, t, c1, c2);
+
+            const Real residualPenetration = minDist - (c2 - c1).norm();
+            if (residualPenetration > static_cast<Real>(0.0))
+            {
+                ++residualPenetratingContactCount;
+                residualSumPenetration += residualPenetration;
+                if (residualPenetration > residualMaxPenetration)
+                    residualMaxPenetration = residualPenetration;
+            }
+        }
+
+        diagnostics->candidatePairCount = candidatePairCount;
+        diagnostics->penetratingContactCount = penetratingContactCount;
+        diagnostics->maxPenetration = maxPenetration;
+        diagnostics->sumPenetration = sumPenetration;
+        diagnostics->correctionEndpointCount = correctionEndpointCount;
+        diagnostics->cappedCorrectionCount = cappedCorrectionCount;
+        diagnostics->maxAppliedCorrection = maxAppliedCorrection;
+        diagnostics->normalFlipViolationCount = normalFlipViolationCount;
+        diagnostics->residualCandidateCount = residualCandidateCount;
+        diagnostics->residualPenetratingContactCount = residualPenetratingContactCount;
+        diagnostics->residualMaxPenetration = residualMaxPenetration;
+        diagnostics->residualSumPenetration = residualSumPenetration;
     }
 
     if (normalFlipViolationCount > 0)

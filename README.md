@@ -114,6 +114,7 @@ The seed bank is not checked in. It is created/appended in `Demos/MyCableDemo/` 
 | Catalog generation | `--catalog-run` plus optional `--catalog-max`, `--catalog-start`, `--catalog-file` | Appends catalog rows to a TSV file |
 | Cut heuristic evaluation | `--eval-run` plus optional `--eval-output`, `--eval-random-trials` | Replaces the cut-evaluation TSV |
 | Cuts-to-zero evaluation | `--eval-cuts-to-zero` plus optional `--eval-ctz-output`, `--eval-ctz-max-cuts`, `--eval-ctz-random-trials` | Replaces the cuts-to-zero TSV |
+| Topology audit | `--topology-audit-run` plus optional `--topology-audit-steps`, `--topology-audit-cuts`, `--topology-audit-max-seeds`, `--topology-audit-output` | Writes per-phase and per-event audit TSVs plus a summary |
 
 The `--eval-*` and catalog modes run without user interaction, but they still create an OpenGL window. On a machine without a display, run them under a virtual display, for example:
 
@@ -153,6 +154,112 @@ Example cuts-to-zero evaluation:
   --eval-ctz-max-cuts=10 \
   --eval-ctz-random-trials=20
 ```
+
+### Topology audit
+
+`--topology-audit-run` checks that the cable's topology is preserved while it settles under gravity and after each heuristic cut. It runs over the seeds in the catalog, picks the same hoop-midpoint cut used by the heuristic strategy, and audits **every simulation substep** after the initial settling phase and after every cut. There is deliberately no sampling stride: a sparse check could miss a pass-through.
+
+A cut is an intentional topology change, so the auditor re-baselines immediately after the rebuilt geometry is in place. Only motion after the cut is judged.
+
+```bash
+xvfb-run -a ./bin/MyCableDemo \
+  --topology-audit-run \
+  --catalog-file=results/dataset_final/catalog.tsv \
+  --topology-audit-max-seeds=100 \
+  --topology-audit-steps=300 \
+  --topology-audit-cuts=3 \
+  --topology-audit-output=results/topology_audit
+```
+
+For a full catalog, [`scripts/run_topology_audit.sh`](scripts/run_topology_audit.sh) shards the catalog across parallel single-threaded workers and merges the per-shard results into one set of files:
+
+```bash
+scripts/run_topology_audit.sh \
+  --catalog results/full_dataset_20261106_112203/current/catalog.tsv \
+  --output-prefix results/full_dataset_20261106_112203/topology_audit \
+  --workers 32 --steps 300 --cuts 3
+```
+
+Single-threaded workers are about three times faster per seed than letting OpenMP spread one seed over all cores, so sharding by seed is the efficient way to cover a large catalog. Per-shard catalogs, logs, and outputs are kept under `<prefix>_work/`.
+
+| Argument | Description |
+| --- | --- |
+| `--topology-audit-run` | Enable unattended topology auditing over catalog seeds |
+| `--topology-audit-steps=<n>` | Audited substeps per phase (default 1000) |
+| `--topology-audit-cuts=<n>` | Heuristic cuts per seed (default 0) |
+| `--topology-audit-max-seeds=<n>` | Limit the number of catalog seeds (default: all) |
+| `--topology-audit-output=<prefix>` | Output prefix (default `<catalog-dir>/topology_audit`) |
+| `--topology-audit-contact-eps=<value>` | Centre-line contact threshold (default `1e-4`) |
+| `--topology-audit-trace` | Also write a per-step trace file |
+| `--dt=<value>` | Physics timestep (default 0.005) |
+| `--collision-iterations=<n>` | Self-collision solver iterations per substep (default 8) |
+| `--collision-compliance=<value>` | Contact compliance (default 1e-10) |
+| `--collision-max-correction=<value>` | Max per-endpoint contact correction (default 0.08) |
+| `--normal-damping=<value>` | Contact normal damping (default 0.15) |
+| `--tangential-damping=<value>` | Contact tangential damping, velocity-proportional (default 0.05); not Coulomb/stick–slip friction |
+| `--hash-cell-size=<value>` | Self-collision spatial-hash cell size (default 0.2) |
+
+#### How the audit works
+
+Gravity here is along `-Y`, so the cable is a 2.5-D object: its over/under structure lives in the `XZ` projection, and `Y` records which strand is on top. That is why no full 3-D knot invariant is needed. For every pair of non-adjacent edges whose `XZ` projections cross, the auditor records:
+
+```text
+heightDelta = y_A - y_B   at the projected crossing point
+```
+
+Because both points share `x` and `z`, `|heightDelta|` is also the strands' centre-line distance at that crossing. For a ground-resting tangle, touching strands sit at `|heightDelta| ≈ 2 * ropeRadius`, so the default contact threshold is far below that and only real centre-line contact trips it.
+
+Violation types:
+
+| Type | Meaning |
+| --- | --- |
+| `CROSSING_FLIP` | A persistent crossing changed the sign of `heightDelta`: the strands passed through each other |
+| `BIRTH_AT_CONTACT` | A crossing appeared while the strands were within `contactEpsilon`, so it was born through contact rather than by a projection rearrangement |
+| `DEATH_AT_CONTACT` | A crossing disappeared while the strands were within `contactEpsilon` |
+| `CENTERLINE_CONTACT` | A crossing stayed within `contactEpsilon`; the strands are touching or interpenetrating at the centre line |
+
+Crossings that appear or disappear with real vertical separation are ordinary projection rearrangements (a Reidemeister-style move in the plan view) and are not reported. Adjacent edges of the same piece are excluded, and endpoint intersections are skipped to avoid double counting at shared particles.
+
+#### Outputs
+
+All files use the `--topology-audit-output` prefix:
+
+| File | Contents |
+| --- | --- |
+| `<prefix>_seeds.tsv` | One row per seed and phase (`pre_cut`, `post_cut_1`, ...) |
+| `<prefix>_events.tsv` | One row per violation |
+| `<prefix>_summary.txt` | Aggregate totals/extrema and solver/config parameters across the run |
+| `<prefix>_trace.tsv` | Optional per-step crossing, contact, and penetration diagnostics (`--topology-audit-trace`) |
+
+`_seeds.tsv` records per-phase topology and solver-contact diagnostics, including:
+
+```text
+seed knotType phase steps cutApplied cutPiece cutEdge
+violations centerlineContacts surfaceOverlaps crossingsPerStep minAbsHeight
+candidatePairs penetratingContacts maxPenetration meanPenetration
+residualCandidatePairs residualPenetratingContacts residualMaxPenetration residualMeanPenetration
+maxGroundPenetration cappedCorrections correctionEndpoints maxAppliedCorrection normalFlips
+firstViolationStep firstViolationType
+firstPieceA firstEdgeA firstPieceB firstEdgeB
+firstPreviousHeight firstCurrentHeight
+```
+
+`penetratingContacts`/`maxPenetration`/`meanPenetration` summarize pre-correction (detected) self-collision penetrations accumulated over solver iterations in audited substeps. `residual*` fields are measured after the final self-collision iteration of each substep, before the ground clamp, and `maxGroundPenetration` records pre-clamp ground penetration. These diagnostics separate *detected-and-corrected* interpenetration from *remaining* penetration/contact-violation residuals at audited states.
+
+`_events.tsv` includes the crossing/topology event plus the local contact-penetration diagnostics at the event step:
+
+```text
+seed knotType phase step type
+pieceA edgeA pieceB edgeB x z
+previousX previousZ previousHeight currentHeight
+candidatePairs penetratingContacts maxPenetration
+residualPenetratingContacts residualMaxPenetration
+maxGroundPenetration normalFlips
+```
+
+`surfaceOverlaps` counts crossings with `|heightDelta| < 2 * ropeRadius`. It is a geometric diagnostic only: in a ground-resting tangle most crossings are at that distance, so it does not by itself indicate a topology violation.
+
+Read the results as **observed discrete-substep evidence, not a formal proof**. The simulation advances with finite `dt`, a finite number of compliance-softened, capped/averaged collision-correction passes per substep, and finite contact passes. Every-substep auditing observes every configured substep after settling/re-baselining, but a crossing or penetration event that is born and resolved entirely between audited states would not be seen. The honest claim is: *no topology violation and no residual penetration above the reported audited-state diagnostics were observed at audited substeps under the stated solver configuration.* For the mathematical formulation and sensitivity methodology, see [`docs/topology_audit_math.md`](docs/topology_audit_math.md) and [`docs/creep_sensitivity_math.md`](docs/creep_sensitivity_math.md).
 
 ### Full parallel pipeline
 
@@ -305,9 +412,9 @@ the signed PC1 reduction.
 | `--catalog-steps-per-frame=<n>` | Simulation steps per frame in catalog mode; also enables catalog mode |
 | `--catalog-max=<n>` | Stop after N catalog samples; also enables catalog mode |
 | `--catalog-start=<n>` | Start the catalog seed sequence at N; also enables catalog mode |
-| `--creep=<value>` | Rest-state creep rate; `0` disables adaptation but keeps batch triggering enabled |
-| `--creep-settle-steps=<n>` | Steps to run after creep activation before batch evaluation (default 0) |
-| `--creep-threshold=<value>` | Creep mismatch activation threshold (default 0.01) |
+| `--creep=<value>` | Rest-state creep rate $\gamma$; `0` disables adaptation but keeps batch triggering enabled |
+| `--creep-settle-steps=<n>` | Steps to run after creep activation/capture before batch evaluation (default 0) |
+| `--creep-threshold=<value>` | Creep mismatch activation threshold (default 0.01; pipelines/audits commonly use 0.0001 under gravity-only settling) |
 | `--eval-run` | Run cut evaluation (all non-oracle strategies) |
 | `--eval-oracle` | Also run the exhaustive single-cut oracle; implies `--eval-run` |
 | `--eval-cuts-to-zero` | Run cuts-to-zero evaluation |
@@ -318,6 +425,20 @@ the signed PC1 reduction.
 | `--eval-random-trials=<n>` | Random edge/hoop trials per sample in cut evaluation (default 10) |
 | `--eval-ctz-max-cuts=<n>` | Maximum cuts per sample in cuts-to-zero evaluation (default 10) |
 | `--eval-ctz-random-trials=<n>` | Random edge/hoop trials per sample in cuts-to-zero evaluation (default 20) |
+| `--dt=<value>` | Physics timestep (default 0.005) |
+| `--collision-iterations=<n>` | Self-collision solver iterations per substep (default 8) |
+| `--collision-compliance=<value>` | Contact compliance (default 1e-10) |
+| `--collision-max-correction=<value>` | Max per-endpoint contact correction (default 0.08) |
+| `--normal-damping=<value>` | Contact normal damping (default 0.15) |
+| `--tangential-damping=<value>` | Contact tangential damping, velocity-proportional (default 0.05); not Coulomb/stick–slip friction |
+| `--hash-cell-size=<value>` | Self-collision spatial-hash cell size (default 0.2) |
+| `--topology-audit-run` | Run unattended topology auditing over catalog seeds |
+| `--topology-audit-steps=<n>` | Audited substeps per phase (default 1000) |
+| `--topology-audit-cuts=<n>` | Heuristic cuts per seed (default 0) |
+| `--topology-audit-max-seeds=<n>` | Limit the number of catalog seeds (default: all) |
+| `--topology-audit-output=<prefix>` | Output prefix (default `<catalog-dir>/topology_audit`) |
+| `--topology-audit-contact-eps=<value>` | Centre-line contact threshold (default `1e-4`) |
+| `--topology-audit-trace` | Also write a per-step trace file |
 
 Default output paths are resolved relative to the executable, so running `bin/MyCableDemo` uses the checked-in `Demos/MyCableDemo/` directory. The `*_v3.tsv` files there are reference artifacts from earlier runs; the defaults use the unsuffixed names unless you pass an explicit path.
 
@@ -419,7 +540,7 @@ Scene construction, keyboard bindings, evaluation orchestration, and output path
 | Path | Contents |
 | --- | --- |
 | `Demos/MyCableDemo/` | Cable demo, physics helpers, analyzers, evaluation data, legacy PCA script |
-| `scripts/` | Dataset pipeline and PCA complexity analysis |
+| `scripts/` | Dataset pipeline, parallel topology audit runner, and PCA complexity analysis |
 | `Demos/Visualization/` | OpenGL/imgui visualization helpers |
 | `PositionBasedDynamics/` | PBD/XPBD constraint library |
 | `Simulation/` | Simulation framework |
