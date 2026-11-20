@@ -7,3 +7,6 @@ results/
 __pycache__/
 *.pyc
 .venv/
+
+# Separate paper repository; not part of the CableSim project.
+latex_paper/
