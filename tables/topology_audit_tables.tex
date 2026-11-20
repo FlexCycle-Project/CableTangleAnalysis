@@ -1,0 +1,44 @@
+% Generated audit/sensitivity summary tables.
+% Compile as part of a document providing the tabular/booktabs environment as needed.
+% Values are observed at audited discrete substeps only (finite dt, finite collision
+% iterations/passes, compliance, capped/averaged corrections) and are not a
+% continuous-time/continuous-collision no-tunneling or no-penetration guarantee.
+
+\begin{table}[t]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \caption{Discrete-substep topology and penetration audit (nominal and spot checks). Residual penetration is measured after the final self-collision iteration of each substep, before the ground clamp. ``Baseline'' is the legacy audit (no penetration-diagnostic columns). ``Nominal'' is the diagnostics-enabled 100-seed run (24/24 shards merged).}
+  \label{tab:topology-audit}
+  \begin{tabular}{lrrrrrrrr}
+    \hline
+    Condition & Seeds & Phases & Steps & Viol. & Seeds w/ viol. & Max pen. & Resid. max & Max ground \\
+    \hline
+    Baseline (current, $\gamma{=}0.02$, legacy) & 1000 & 2977 & 893100 & 2 & 2 & -- & -- & -- \\
+    Nominal ($\gamma{=}0.02$, diag.) & 100 & 287 & 86100 & 0 & 0 & 0.1534 & 0.3351 & 0.0662 \\
+    $\Delta t{=}0.0025$ spot (20-seed) & 20 & 57 & 17100 & 0 & 0 & 0.0893 & 0.0424 & 0.0291 \\
+    Iterations $=16$ spot (20-seed) & 20 & 57 & 17100 & 0 & 0 & 0.0769 & 0.0069 & 0.0485 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \caption{Creep and tangential-contact sensitivity on 20-seed diagnostic subsets (300 steps/phase, 3 cuts, $\epsilon_c{=}10^{-4}$, $\Delta t{=}0.005$, 8 iterations unless noted). Creep $\gamma$ relaxes the captured bend--twist rest orientation; $\gamma{=}0$ is the captured/fixed-rest baseline. Tangential response $b_t$ is velocity-proportional damping, not Coulomb/stick--slip friction, so frictional sticking/threshold behavior is out of scope. ``cap'' = count of capped endpoint corrections; ``max corr.'' is the maximum applied endpoint correction.}
+  \label{tab:sensitivity}
+  \begin{tabular}{lrrrrrrrrr}
+    \hline
+    Condition & Seeds & Phases & Viol. & Max pen. & Resid. max & Resid. mean & Max ground & Cap & Max corr. \\
+    \hline
+    $\gamma=0.00$ & 20 & 58 & 0 & 0.1440 & 0.1136 & 0.006655 & 0.0695 & 394 & 0.0800 \\
+    $\gamma=0.02$ (nominal) & 20 & 58 & 0 & 0.1534 & 0.1157 & 0.006332 & 0.0662 & 714 & 0.0800 \\
+    $\gamma=0.05$ & 20 & 58 & 0 & 0.1536 & 0.0943 & 0.005442 & 0.0708 & 282 & 0.0800 \\
+    $\gamma=0.20$ & 20 & 58 & 0 & 0.1230 & 0.0482 & 0.004137 & 0.0619 & 6 & 0.0800 \\
+    $b_t=0.00$, $\gamma{=}0.02$ & 20 & 56 & 0 & 0.1182 & 0.1006 & 0.007685 & 0.0728 & 15 & 0.0800 \\
+    $b_t=0.05$, $\gamma{=}0.02$ (nominal) & 20 & 58 & 0 & 0.1534 & 0.1157 & 0.006332 & 0.0662 & 714 & 0.0800 \\
+    $b_t=0.20$, $\gamma{=}0.02$ & 20 & 58 & 0 & 0.1058 & 0.0635 & 0.005212 & 0.0619 & 0 & 0.0681 \\
+    \hline
+  \end{tabular}
+\end{table}
