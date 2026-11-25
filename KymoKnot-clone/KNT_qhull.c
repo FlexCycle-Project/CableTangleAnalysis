@@ -27,7 +27,7 @@ void qhull_init (int qhull_buffer_dim)
   {
     qhull_ismalloc = FALSE;
 
-    sprintf (qhull_flags, "qhull Qt QJ Fa");
+    sprintf (qhull_flags, "qhull Qt QJ Fa Pp");
     qhull_buffer = d1t(qhull_buffer_dim);
     qhull_is_init = 1;
   }
