@@ -2,6 +2,7 @@ lib/
 bin/
 !bin/*.bat
 build/*
+build*/
 opencode.json
 results/
 __pycache__/
