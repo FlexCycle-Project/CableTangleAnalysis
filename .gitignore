@@ -15,3 +15,13 @@ latex_paper/
 KymoKnot-clone/*.x
 KymoKnot-clone/qhull-2012.1/bin/
 Utils/Version.h
+
+# Local run artifacts and editor state.
+backups/
+imgui.ini
+logs/
+Demos/MyCableDemo/knot_seed_bank.txt
+Demos/MyCableDemo/knot_seed_catalog*.tsv
+Demos/MyCableDemo/knot_cut_eval*.tsv
+Demos/MyCableDemo/knot_cuts_to_zero*.tsv
+Demos/MyCableDemo/*_stage_metrics.tsv
