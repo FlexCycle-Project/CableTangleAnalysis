@@ -76,19 +76,6 @@ static Vector3r clampVec(const Vector3r& v, Real maxNorm)
     return v;
 }
 
-static Vector3r computeSpringDampedAcceleration(
-    const Vector3r& springTerm,
-    const Vector3r& currentVelocity,
-    Real damping,
-    Real maxAccel)
-{
-    Vector3r acceleration = springTerm - damping * currentVelocity;
-    const Real accelNorm = acceleration.norm();
-    if (accelNorm > maxAccel)
-        acceleration *= (maxAccel / accelNorm);
-    return acceleration;
-}
-
 static uint64_t makeOrderedEdgePairKey(unsigned int a, unsigned int b)
 {
     const uint64_t lo = std::min<uint64_t>(a, b);
@@ -332,64 +319,6 @@ void setNewCableBendTwistRestStateToStraight(
     }
 }
 
-void applyMouseDragForces(
-    SimulationModel* model,
-    Real dt,
-    const MouseDragState& dragState,
-    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
-    const RopeConfig& ropeCfg,
-    Real spring,
-    Real damping,
-    Real maxAccel)
-{
-    if (!dragState.active || model == nullptr)
-        return;
-    if (dragState.pieceIndex >= pieceRanges.size())
-        return;
-
-    const std::pair<unsigned int, unsigned int> range =
-        pieceRanges[dragState.pieceIndex];
-
-    if (range.second <= range.first)
-        return;
-
-    const unsigned int localEdgeIndex = static_cast<unsigned int>(dragState.edgeIndex);
-    const unsigned int i0 = range.first + localEdgeIndex;
-    const unsigned int i1 = i0 + 1;
-
-    ParticleData& particles = model->getParticles();
-    if (i1 >= particles.getNumberOfParticles())
-        return;
-
-    const Real w0 = static_cast<Real>(1.0) - dragState.edgeT;
-    const Real w1 = dragState.edgeT;
-
-    // Dragging acts at the selected point on an edge, not at a single particle.
-    // The same barycentric weights distribute the spring-damper force to the
-    // two endpoints, keeping the interaction continuous along the cable.
-    const Vector3r p0 = particles.getPosition(i0);
-    const Vector3r p1 = particles.getPosition(i1);
-    const Vector3r v0 = particles.getVelocity(i0);
-    const Vector3r v1 = particles.getVelocity(i1);
-
-    const Vector3r currentPoint = w0 * p0 + w1 * p1;
-    const Vector3r currentVelocity = w0 * v0 + w1 * v1;
-    Vector3r targetPoint = dragState.targetPoint;
-    if (dragState.upwardPull)
-        targetPoint.y() = std::max(targetPoint.y(), currentPoint.y() + static_cast<Real>(0.1));
-
-    const Vector3r acceleration = computeSpringDampedAcceleration(
-        spring * (targetPoint - currentPoint),
-        currentVelocity,
-        damping,
-        maxAccel);
-
-    (void)ropeCfg;
-
-    particles.getVelocity(i0) += dt * w0 * acceleration;
-    particles.getVelocity(i1) += dt * w1 * acceleration;
-}
-
 Real applyGroundConstraintToModel(PBD::SimulationModel* model, Real groundY)
 {
     if (model == nullptr)
@@ -630,60 +559,6 @@ void applyBendTwistRestStateCreep(
         if (norm > static_cast<Real>(1e-12))
             restRelative.coeffs() = blendedCoeffs / norm;
 
-    }
-}
-
-void applyPullForces(
-    SimulationModel* model,
-    Real dt,
-    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
-    const PhysicsConfig& physicsCfg)
-{
-    ParticleData& particles = model->getParticles();
-
-    auto pullOneParticle = [&](unsigned int particleIndex, const Vector3r& direction)
-    {
-        if (particleIndex >= particles.getNumberOfParticles())
-            return;
-        Vector3r& velocity = particles.getVelocity(particleIndex);
-        const Vector3r acceleration = computeSpringDampedAcceleration(
-            physicsCfg.pullSpring * direction,
-            velocity,
-            physicsCfg.pullDamping,
-            physicsCfg.pullMaxAccel);
-
-        velocity += dt * acceleration;
-    };
-
-    for (const std::pair<unsigned int, unsigned int>& range : pieceRanges)
-    {
-        const unsigned int firstParticle = range.first;
-        const unsigned int lastParticle = range.second;
-        if (firstParticle >= particles.getNumberOfParticles() ||
-            lastParticle >= particles.getNumberOfParticles() ||
-            firstParticle >= lastParticle)
-        {
-            continue;
-        }
-
-        if (physicsCfg.pullLeftScale > static_cast<Real>(0.0))
-        {
-            pullOneParticle(
-                firstParticle,
-                Vector3r(
-                    -physicsCfg.pullLeftScale,
-                    static_cast<Real>(0.0),
-                    static_cast<Real>(0.0)));
-        }
-        if (physicsCfg.pullRightScale > static_cast<Real>(0.0))
-        {
-            pullOneParticle(
-                lastParticle,
-                Vector3r(
-                    physicsCfg.pullRightScale,
-                    static_cast<Real>(0.0),
-                    static_cast<Real>(0.0)));
-        }
     }
 }
 

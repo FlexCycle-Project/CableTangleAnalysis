@@ -23,18 +23,12 @@ struct RopeConfig
     Real bendStiffnessY = static_cast<Real>(0.003);
     Real twistStiffness = static_cast<Real>(0.012);
     Real dx = static_cast<Real>(0.1);
-    Real renderRadius = static_cast<Real>(0.06);
 };
 
 struct PhysicsConfig
 {
     Real timeStep = static_cast<Real>(0.005);
-    Real pullSpring = static_cast<Real>(1000.0);
-    Real pullDamping = static_cast<Real>(2.0);
-    Real pullMaxAccel = static_cast<Real>(1000.0);
     Real velocityRecomputeBlend = static_cast<Real>(0.03);
-    Real pullLeftScale = static_cast<Real>(1.0);
-    Real pullRightScale = static_cast<Real>(1.0);
 };
 
 struct RestShapeCreepConfig
@@ -135,21 +129,6 @@ struct SelfCollisionDiagnostics
     }
 };
 
-struct MouseDragState
-{
-    bool selected = false;
-    bool active = false;
-    bool upwardPull = false;
-    size_t pieceIndex = std::numeric_limits<size_t>::max();
-    size_t edgeIndex = std::numeric_limits<size_t>::max();
-    Real edgeT = static_cast<Real>(0.0);
-    Real rayDepthT = static_cast<Real>(0.0);
-    Vector3r grabbedPoint = Vector3r::Zero();
-    Vector3r targetPoint = Vector3r::Zero();
-};
-
-extern bool g_pullEnabled;
-
 Real clamp01(Real x);
 void closestPtSegmentSegment(
     const Vector3r& p1, const Vector3r& q1,
@@ -173,23 +152,9 @@ void addCableModel(
 void setNewCableBendTwistRestStateToStraight(
     PBD::SimulationModel* model,
     size_t firstConstraintIndex);
-void applyMouseDragForces(
-    PBD::SimulationModel* model,
-    Real dt,
-    const MouseDragState& dragState,
-    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
-    const RopeConfig& ropeCfg,
-    Real spring,
-    Real damping,
-    Real maxAccel);
 Real applyGroundConstraintToModel(
     PBD::SimulationModel* model,
     Real groundY);
-void applyPullForces(
-    PBD::SimulationModel* model,
-    Real dt,
-    const std::vector<std::pair<unsigned int, unsigned int>>& pieceRanges,
-    const PhysicsConfig& physicsCfg);
 void applySelfCollision(
     PBD::SimulationModel* model,
     Real dt,

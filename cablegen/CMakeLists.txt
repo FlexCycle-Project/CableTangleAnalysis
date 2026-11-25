@@ -73,6 +73,7 @@ target_include_directories(cablegen PRIVATE
     ${PROJECT_PATH}
     ${EIGEN3_INCLUDE_DIR}
 )
+target_compile_definitions(cablegen PRIVATE CABLEGEN_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(cablegen PRIVATE
     PositionBasedDynamics

@@ -55,44 +55,31 @@ static bool splitCablePieceAtEdge(
     std::vector<std::vector<Vector3r>>& ropePieces,
     size_t pieceIndex,
     size_t edgeIndex);
-static bool loadKnotSeedPresetFromFile(const std::string& selector);
-static bool selectKnotSeedPresetByType(const std::string& knotType);
-static std::vector<std::string> detectCurrentKnotTypes(SimulationModel* model);
-static void saveCurrentKnotSeedPreset();
-static void evaluateCurrentCableTanglement(bool saveSeedPreset);
 static void evaluateAndRecordCatalogSample(bool printReport);
 static void evaluateAndRecordCutHeuristicSample();
 static void evaluateAndRecordCutsToZeroSample();
-static void evaluateAndRecordCutsToZeroOracleSample();
 static void appendCatalogRows(
     const std::vector<std::vector<Vector3r>>& ropePieces,
     const std::vector<SelfCollisionContact>& contacts,
     const TanglementAnalyzer::TanglementAnalysisResult& tanglement);
-static void prepareCatalogSeedForNextRun();
 static bool storeKnotSeedPresetEntry(
     const std::string& knotType,
     unsigned int seed,
     bool appendToFile);
 static bool isNontrivialKnotType(const std::string& knotType);
-static std::vector<std::string> detectKnotTypesForPieces(
-    const std::vector<std::vector<Vector3r>>& ropePieces,
-    const std::vector<SelfCollisionContact>& contacts);
 static std::string resolveDefaultKnotSeedBankPath();
 static std::string resolveDefaultKnotSeedCatalogPath();
 static std::string resolveDefaultCutEvalOutputPath();
 static std::string resolveDefaultCutsToZeroEvalOutputPath();
-static std::string resolveDefaultCutsToZeroOracleOutputPath();
 static size_t countCurvatureSamples(const std::vector<Vector3r>& points);
 static Real computeTotalCurvature(const std::vector<Vector3r>& points);
 static Real computeCurvatureOutsideKnotRegions(
     const std::vector<Vector3r>& points,
     const PBD::KymoKnotAnalysisResult& knotResult,
     size_t* sampleCount = nullptr);
-static void generateNextCatalogSeed();
 static bool loadCutEvalCatalog();
 static bool prepareCutEvalOutputFile();
 static bool prepareCutsToZeroEvalOutputFile();
-static bool prepareCutsToZeroOracleOutputFile();
 static void prepareCutEvalSeed(size_t index);
 static void generateNextCutEvalSeed();
 static std::string resolveDefaultTopologyAuditPrefix();
@@ -117,29 +104,17 @@ static std::vector<std::pair<unsigned int, unsigned int>> g_cablePieceRanges;
 static std::map<std::string, std::vector<unsigned int>> g_knotSeedPresets;
 static std::string g_knotSeedBankPath;
 static std::string g_knotSeedCatalogPath;
-static bool g_useKnotSeedPreset = false;
-static std::string g_selectedKnotType;
-static unsigned int g_selectedKnotSeed = 0;
-static bool g_useDirectRandomSeed = false;
-static unsigned int g_directRandomSeed = 0;
 static bool g_catalogRunEnabled = false;
 static unsigned int g_catalogSamplesWritten = 0;
-static unsigned int g_catalogMaxSamples = 0;
-static unsigned int g_catalogNextSeed = 0;
 static unsigned int g_catalogStepsPerFrame = 1;
-static bool g_catalogRenderEnabled = false;
-static std::mt19937 g_catalogRng;
 static bool g_evalRunEnabled = false;
 static std::string g_evalOutputPath;
 static unsigned int g_evalRandomTrials = 10;
 static bool g_evalOracleEnabled = false;
 static bool g_evalCutsToZeroEnabled = false;
-static bool g_evalCutsToZeroOracleOnly = false;
 static std::string g_evalCutsToZeroOutputPath;
-static std::string g_evalCutsToZeroOracleOutputPath;
 static std::string g_evalStageMetricsOutputPath;
 static std::string g_evalCutsToZeroStageMetricsOutputPath;
-static std::string g_evalCutsToZeroOracleStageMetricsOutputPath;
 static unsigned int g_evalCutsToZeroMaxCuts = 10;
 static unsigned int g_evalCutsToZeroRandomTrials = 20;
 static unsigned long long g_evalCutsToZeroOracleMaxNodes = 5000000ULL;
@@ -232,10 +207,6 @@ static Real g_topologyAuditMaxGroundPenetration = static_cast<Real>(0.0);
 static SelfCollisionDiagnostics g_lastSubstepCollision;
 static Real g_lastSubstepGroundPenetration = static_cast<Real>(0.0);
 
-static bool g_useMathematicalKnot = false;
-static std::string g_mathematicalKnotName = "5_2";
-bool g_pullEnabled = false;
-static bool g_gravityEnabled = true;
 static Vector3r g_gravityReference = Vector3r(0.0, -9.81, 0.0);
 static bool g_autoKnotEvaluationDone = false;
 static bool g_stopRequested = false;
@@ -275,16 +246,6 @@ static std::string resolveDefaultCutsToZeroEvalOutputPath()
         return "knot_cuts_to_zero.tsv";
 
     return catalogPath.substr(0, slashPos + 1) + "knot_cuts_to_zero.tsv";
-}
-
-static std::string resolveDefaultCutsToZeroOracleOutputPath()
-{
-    const std::string base = resolveDefaultCutsToZeroEvalOutputPath();
-    const size_t dotPos = base.find_last_of('.');
-    if (dotPos == std::string::npos)
-        return base + "_oracle.tsv";
-
-    return base.substr(0, dotPos) + "_oracle.tsv";
 }
 
 static std::string deriveStageMetricsPath(const std::string& evalPath)
@@ -451,80 +412,6 @@ static bool prepareCutsToZeroEvalOutputFile()
         g_evalCutsToZeroOutputPath);
 }
 
-static bool prepareCutsToZeroOracleOutputFile()
-{
-    if (g_evalCutsToZeroOracleOutputPath.empty())
-        g_evalCutsToZeroOracleOutputPath = resolveDefaultCutsToZeroOracleOutputPath();
-
-    std::ofstream out(g_evalCutsToZeroOracleOutputPath, std::ios::trunc);
-    if (!out)
-    {
-        std::cout << "[ctz-oracle] could not open output file "
-                  << g_evalCutsToZeroOracleOutputPath << std::endl;
-        return false;
-    }
-
-    out << "seed\tknotType\tT_before\toracle_cuts\toracle_resolved"
-        << "\toracle_exhaustive\toracle_nodes\toracle_sequence\n";
-
-    if (g_evalCutsToZeroOracleStageMetricsOutputPath.empty())
-    {
-        g_evalCutsToZeroOracleStageMetricsOutputPath =
-            deriveStageMetricsPath(g_evalCutsToZeroOracleOutputPath);
-    }
-
-    if (!prepareStageMetricsOutputFile(
-            g_evalCutsToZeroOracleStageMetricsOutputPath,
-            g_evalCutsToZeroOracleOutputPath))
-    {
-        return false;
-    }
-
-    // appendCutStageMetricsRow routes cuts_to_zero rows through this path.
-    g_evalCutsToZeroStageMetricsOutputPath =
-        g_evalCutsToZeroOracleStageMetricsOutputPath;
-    return true;
-}
-
-static bool loadKnotSeedPresetFile()
-{
-    g_knotSeedPresets.clear();
-    if (g_knotSeedBankPath.empty())
-        return false;
-
-    std::ifstream in(g_knotSeedBankPath);
-    if (!in)
-    {
-        std::cout << "[knot-seeds] could not open " << g_knotSeedBankPath
-                  << ", using current random-cable settings." << std::endl;
-        return false;
-    }
-
-    std::string line;
-    while (std::getline(in, line))
-    {
-        const size_t hashPos = line.find('#');
-        if (hashPos != std::string::npos)
-            line = line.substr(0, hashPos);
-
-        std::istringstream iss(line);
-        std::string knotType;
-        unsigned int seed = 0;
-        if (!(iss >> knotType >> seed))
-            continue;
-
-        g_knotSeedPresets[knotType].push_back(seed);
-    }
-
-    size_t presetCount = 0;
-    for (const auto& entry : g_knotSeedPresets)
-        presetCount += entry.second.size();
-
-    std::cout << "[knot-seeds] loaded " << presetCount
-              << " preset(s) from " << g_knotSeedBankPath << std::endl;
-    return presetCount > 0;
-}
-
 static bool storeKnotSeedPresetEntry(
     const std::string& knotType,
     unsigned int seed,
@@ -559,146 +446,6 @@ static bool isNontrivialKnotType(const std::string& knotType)
         knotType != "UNKNOT" &&
         knotType != "0_1" &&
         knotType != "none";
-}
-
-static bool loadKnotSeedPresetFromFile(const std::string& selector)
-{
-    std::string knotType = selector;
-    size_t occurrenceIndex = 0;
-    const size_t colonPos = selector.find(':');
-    if (colonPos != std::string::npos)
-    {
-        knotType = selector.substr(0, colonPos);
-        try
-        {
-            const int parsedIndex = std::stoi(selector.substr(colonPos + 1));
-            occurrenceIndex = (parsedIndex > 0) ? static_cast<size_t>(parsedIndex - 1) : 0;
-        }
-        catch (...)
-        {
-            occurrenceIndex = 0;
-        }
-    }
-
-    const auto found = g_knotSeedPresets.find(knotType);
-    if (found == g_knotSeedPresets.end() || found->second.empty())
-    {
-        std::cout << "[knot-seeds] no preset found for '" << selector << "'" << std::endl;
-        return false;
-    }
-
-    const std::vector<unsigned int>& seeds = found->second;
-    if (occurrenceIndex >= seeds.size())
-    {
-        std::cout << "[knot-seeds] '" << knotType << "' only has "
-                  << seeds.size() << " seed(s)." << std::endl;
-        return false;
-    }
-
-    g_useKnotSeedPreset = true;
-    g_selectedKnotType = knotType;
-    g_selectedKnotSeed = seeds[occurrenceIndex];
-    g_cfg.randomCable.enabled = true;
-    g_cfg.randomCable.seed = g_selectedKnotSeed;
-    std::cout << "[knot-seeds] selected " << g_selectedKnotType
-              << " seed=" << g_selectedKnotSeed
-              << " (index " << (occurrenceIndex + 1) << ')'
-              << std::endl;
-    return true;
-}
-
-static bool selectKnotSeedPresetByType(const std::string& knotType)
-{
-    const auto found = g_knotSeedPresets.find(knotType);
-    if (found == g_knotSeedPresets.end() || found->second.empty())
-    {
-        std::cout << "[knot-seeds] no preset found for knot type '" << knotType << "'" << std::endl;
-        return false;
-    }
-
-    return loadKnotSeedPresetFromFile(knotType);
-}
-
-static std::vector<std::string> detectKnotTypesForPieces(
-    const std::vector<std::vector<Vector3r>>& ropePieces,
-    const std::vector<SelfCollisionContact>& contacts)
-{
-    const TanglementAnalyzer::TanglementAnalysisResult tanglement =
-        TanglementAnalyzer::analyzeTanglement(
-            ropePieces,
-            contacts,
-            g_cfg.rope,
-            g_cfg.selfCollision,
-            g_kymoKnotSearchMode);
-
-    std::vector<std::string> knotTypes;
-    for (const PBD::KymoKnotAnalysisResult& knotResult : tanglement.kymoResults)
-    {
-        if (!knotResult.available || !knotResult.success || knotResult.segments.empty())
-            continue;
-
-        const std::string& knotType = knotResult.segments.front().knotType;
-        if (isNontrivialKnotType(knotType) &&
-            std::find(knotTypes.begin(), knotTypes.end(), knotType) == knotTypes.end())
-        {
-            knotTypes.push_back(knotType);
-        }
-    }
-
-    return knotTypes;
-}
-
-static std::vector<std::string> detectCurrentKnotTypes(SimulationModel* model)
-{
-    if (model == nullptr)
-        return {};
-
-    const std::vector<std::vector<Vector3r>> ropePieces = collectCurrentCablePieces(model);
-    const std::vector<SelfCollisionContact> contacts =
-        detectSelfCollisionContacts(
-            model,
-            g_cablePieceRanges,
-            g_cfg.rope,
-            g_cfg.selfCollision);
-    return detectKnotTypesForPieces(ropePieces, contacts);
-}
-
-static void saveCurrentKnotSeedPreset()
-{
-    SimulationModel* model = Simulation::getCurrent()->getModel();
-    if (model == nullptr)
-    {
-        std::cout << "[knot-seeds] no simulation model available." << std::endl;
-        return;
-    }
-
-    const std::vector<std::string> knotTypes = detectCurrentKnotTypes(model);
-    if (knotTypes.empty())
-    {
-        std::cout << "[knot-seeds] no knot type detected for the current cable." << std::endl;
-        return;
-    }
-
-    if (g_knotSeedBankPath.empty())
-    {
-        std::cout << "[knot-seeds] no seed bank file path configured." << std::endl;
-        return;
-    }
-
-    bool wroteAny = false;
-    for (const std::string& knotType : knotTypes)
-    {
-        if (storeKnotSeedPresetEntry(knotType, g_cfg.randomCable.seed, true))
-        {
-            wroteAny = true;
-            std::cout << "[knot-seeds] saved " << knotType
-                      << " seed=" << g_cfg.randomCable.seed
-                      << " to " << g_knotSeedBankPath << std::endl;
-        }
-    }
-
-    if (!wroteAny)
-        std::cout << "[knot-seeds] the current seed was already catalogued." << std::endl;
 }
 
 static size_t countCurvatureSamples(const std::vector<Vector3r>& points)
@@ -1064,47 +811,6 @@ static void recordCutStage(
         stage,
         cuts,
         computeCutStageMetrics(ropePieces));
-}
-
-static void evaluateCurrentCableTanglement(bool saveSeedPreset)
-{
-    SimulationModel* model = Simulation::getCurrent()->getModel();
-    if (model == nullptr)
-    {
-        std::cout << "No simulation model available." << std::endl;
-        return;
-    }
-
-    const std::vector<SelfCollisionContact> contacts =
-        detectSelfCollisionContacts(
-            model,
-            g_cablePieceRanges,
-            g_cfg.rope,
-            g_cfg.selfCollision);
-    const std::vector<std::vector<Vector3r>> ropePieces =
-        collectCurrentCablePieces(model);
-    const TanglementAnalyzer::TanglementAnalysisResult tanglement =
-        TanglementAnalyzer::analyzeTanglement(
-            ropePieces,
-            contacts,
-            g_cfg.rope,
-            g_cfg.selfCollision,
-            g_kymoKnotSearchMode);
-
-    g_cachedCableKymoKnotResults = tanglement.kymoResults;
-    g_hasCableKymoKnotResults = false;
-    for (const PBD::KymoKnotAnalysisResult& knotResult : g_cachedCableKymoKnotResults)
-    {
-        if (knotResult.available && knotResult.success && !knotResult.segments.empty())
-        {
-            g_hasCableKymoKnotResults = true;
-            break;
-        }
-    }
-
-    TanglementAnalyzer::printTanglementReport(ropePieces, tanglement);
-    if (saveSeedPreset)
-        saveCurrentKnotSeedPreset();
 }
 
 static void evaluateAndRecordCatalogSample(bool printReport)
@@ -2565,170 +2271,14 @@ static void evaluateAndRecordCutsToZeroSample()
               << std::endl;
 }
 
-static void evaluateAndRecordCutsToZeroOracleSample()
-{
-    if (g_evalCurrentIndex >= g_evalSeeds.size())
-        return;
-
-    SimulationModel* model = Simulation::getCurrent()->getModel();
-    if (model == nullptr)
-        return;
-
-    const CutEvalSeedRecord& record = g_evalSeeds[g_evalCurrentIndex];
-    const std::vector<std::vector<Vector3r>> ropePieces =
-        collectCurrentCablePieces(model);
-    const TanglementAnalyzer::TanglementAnalysisResult initialTanglement =
-        TanglementAnalyzer::analyzeTanglementGeometryOnly(
-            ropePieces,
-            {},
-            g_cfg.rope,
-            g_cfg.selfCollision);
-    const int beforeThreading =
-        TanglementAnalyzer::computeThreadingMetrics(initialTanglement).totalThreadingCount;
-
-    auto makeStageContext = [&](const std::string& strategy, unsigned int trial)
-    {
-        CutStageLogContext context;
-        context.eval = "cuts_to_zero";
-        context.seed = record.seed;
-        context.knotType = record.knotType;
-        context.strategy = strategy;
-        context.trial = trial;
-        context.enabled = !g_evalCutsToZeroStageMetricsOutputPath.empty();
-        return context;
-    };
-
-    OraclePathResult result;
-    if (beforeThreading == 0)
-    {
-        result.resolved = true;
-        result.cuts = 0;
-        result.exhaustive = true;
-        result.nodes = 0;
-    }
-    else
-    {
-        result = runCompleteOracleCutsToZero(
-            ropePieces,
-            g_evalCutsToZeroMaxCuts,
-            g_evalCutsToZeroOracleMaxNodes);
-    }
-
-    unsigned int replayCuts = 0;
-    bool replayResolved = false;
-    const bool replayOk = replayOraclePath(
-        ropePieces,
-        result.path,
-        makeStageContext("oracle", 0),
-        replayCuts,
-        replayResolved);
-
-    unsigned int reportedCuts = result.resolved
-        ? replayCuts
-        : g_evalCutsToZeroMaxCuts;
-    bool reportedResolved = result.resolved && replayResolved;
-    bool reportedExhaustive = result.exhaustive && replayOk;
-
-    if (result.resolved && replayOk && replayCuts != result.cuts)
-    {
-        std::cout << "[ctz-oracle] warning: search found "
-                  << result.cuts << " cuts but replay used "
-                  << replayCuts << " cuts for seed=" << record.seed
-                  << std::endl;
-    }
-    if (!replayOk)
-    {
-        std::cout << "[ctz-oracle] warning: could not replay oracle path for seed="
-                  << record.seed << std::endl;
-        reportedResolved = false;
-        reportedCuts = g_evalCutsToZeroMaxCuts;
-    }
-
-    std::string sequence;
-    for (size_t i = 0; i < result.path.size(); ++i)
-    {
-        if (i > 0)
-            sequence += ';';
-        sequence += std::to_string(result.path[i].pieceIndex);
-        sequence += ':';
-        sequence += std::to_string(result.path[i].edgeIndex);
-    }
-
-    std::ofstream out(g_evalCutsToZeroOracleOutputPath, std::ios::app);
-    if (!out)
-    {
-        std::cout << "[ctz-oracle] could not append to "
-                  << g_evalCutsToZeroOracleOutputPath << std::endl;
-        g_evalCutsToZeroOracleOnly = false;
-        return;
-    }
-
-    out << std::fixed << std::setprecision(6)
-        << record.seed << '\t'
-        << record.knotType << '\t'
-        << beforeThreading << '\t'
-        << reportedCuts << '\t'
-        << (reportedResolved ? 1 : 0) << '\t'
-        << (reportedExhaustive ? 1 : 0) << '\t'
-        << result.nodes << '\t'
-        << sequence << '\n';
-
-    ++g_evalSamplesWritten;
-    std::cout << "[ctz-oracle] seed=" << record.seed
-              << " knotType=" << record.knotType
-              << " T_before=" << beforeThreading
-              << " oracleCuts=" << reportedCuts
-              << " resolved=" << (reportedResolved ? 1 : 0)
-              << " exhaustive=" << (reportedExhaustive ? 1 : 0)
-              << " nodes=" << result.nodes
-              << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
-              << std::endl;
-}
-
-static void prepareCatalogSeedForNextRun()
-{
-    unsigned int nextSeed = 0;
-    if (g_catalogNextSeed != 0)
-    {
-        nextSeed = g_catalogNextSeed++;
-        if (g_catalogNextSeed == 0)
-            g_catalogNextSeed = 1;
-    }
-    else
-    {
-        do
-        {
-            nextSeed = g_catalogRng();
-        }
-        while (nextSeed == 0);
-    }
-
-    g_useDirectRandomSeed = false;
-    g_useKnotSeedPreset = false;
-    g_selectedKnotType.clear();
-    g_cfg.randomCable.enabled = true;
-    g_cfg.randomCable.seed = nextSeed;
-}
-
 static void prepareCutEvalSeed(size_t index)
 {
     if (index >= g_evalSeeds.size())
         return;
 
     g_evalCurrentIndex = index;
-    g_useDirectRandomSeed = false;
-    g_useKnotSeedPreset = false;
-    g_selectedKnotType.clear();
     g_cfg.randomCable.enabled = true;
     g_cfg.randomCable.seed = g_evalSeeds[g_evalCurrentIndex].seed;
-}
-
-static void generateNextCatalogSeed()
-{
-    prepareCatalogSeedForNextRun();
-    g_cablePieces.clear();
-    std::cout << "[knot-catalog] next seed=" << g_cfg.randomCable.seed << std::endl;
-    reset();
 }
 
 static void generateNextCutEvalSeed()
@@ -3239,21 +2789,6 @@ static void finishTopologyAuditSeed()
     generateNextCutEvalSeed();
 }
 
-static bool fileHasData(const std::string& path, size_t minLines = 2)
-{
-    std::ifstream in(path);
-    if (!in)
-        return false;
-    std::string line;
-    size_t lines = 0;
-    while (std::getline(in, line))
-    {
-        if (!line.empty())
-            ++lines;
-    }
-    return lines >= minLines;
-}
-
 int main(int argc, char** argv)
 {
     unsigned int seed = 0;
@@ -3365,6 +2900,8 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    const auto startedAt = std::chrono::system_clock::now();
+
     if (outDir.empty())
         outDir = "results/seeds/seed_" + std::to_string(seed);
     std::filesystem::create_directories(outDir);
@@ -3379,10 +2916,6 @@ int main(int argc, char** argv)
     g_cfg.randomCable.enabled = true;
     g_cfg.randomCable.seed = seed;
     KymoKnotAnalyzer::setRandomSeed(seed);
-    g_useDirectRandomSeed = true;
-    g_directRandomSeed = seed;
-    g_useKnotSeedPreset = false;
-    g_useMathematicalKnot = false;
     g_knotSeedBankPath = outDir + "/seed_bank.txt";
     g_knotSeedCatalogPath = catalogPath;
     {
@@ -3415,10 +2948,8 @@ int main(int argc, char** argv)
 
     // 1. Catalog / tanglement metrics.
     g_catalogRunEnabled = true;
-    g_catalogMaxSamples = 1;
     g_catalogStepsPerFrame = 1;
     g_catalogSamplesWritten = 0;
-    g_catalogNextSeed = 0;
     resetStage();
     std::cout << "[cablegen] catalog seed=" << seed << " output=" << catalogPath << std::endl;
     runSettleStage();
@@ -3543,8 +3074,10 @@ int main(int argc, char** argv)
 
     std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
     std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::time_t startTime = std::chrono::system_clock::to_time_t(startedAt);
     std::ofstream meta(outDir + "/meta.tsv", std::ios::trunc);
     meta << "key\tvalue\n"
+         << "version\t" << CABLEGEN_VERSION << "\n"
          << "seed\t" << seed << "\n"
          << "creep\t" << g_cfg.restCreep.creep << "\n"
          << "creep_settle_steps\t" << g_cfg.restCreep.evaluationDelaySteps << "\n"
@@ -3555,9 +3088,13 @@ int main(int argc, char** argv)
          << "ctz_random_trials\t" << ctzRandomTrials << "\n"
          << "audit_steps\t" << auditSteps << "\n"
          << "audit_cuts\t" << auditCuts << "\n"
+         << "audit_contact_eps\t" << g_topologyAuditSettings.contactEpsilon << "\n"
+         << "audit_trace\t" << (auditTrace ? 1 : 0) << "\n"
          << "oracle\t" << (runOracle ? 1 : 0) << "\n"
          << "audit\t" << (runAudit ? 1 : 0) << "\n"
          << "status\t" << (ok ? "complete" : "failed") << "\n"
+         << "started_at\t"
+         << std::put_time(std::localtime(&startTime), "%Y-%m-%dT%H:%M:%S") << "\n"
          << "finished_at\t"
          << std::put_time(std::localtime(&nowTime), "%Y-%m-%dT%H:%M:%S") << "\n";
 
@@ -3598,41 +3135,19 @@ static void applyGravityState()
     if (!Simulation::hasCurrent())
         return;
 
-    Vector3r gravity = g_gravityEnabled
-        ? g_gravityReference
-        : Vector3r::Zero();
-    Simulation::getCurrent()->setVecValue<Real>(Simulation::GRAVITATION, gravity.data());
+    Simulation::getCurrent()->setVecValue<Real>(
+        Simulation::GRAVITATION, g_gravityReference.data());
 }
 
 static void initializeCablePieces()
 {
     g_cablePieces.clear();
-    std::vector<Vector3r> ropePoints;
-    if (g_useKnotSeedPreset)
-    {
-        ropePoints = CableGeneration::generateRandomCableMessPolyline(
+    std::vector<Vector3r> ropePoints =
+        CableGeneration::generateRandomCableMessPolyline(
             g_cfg.layout,
             g_cfg.rope,
             g_cfg.randomCable,
             g_cfg.groundY);
-    }
-    else if (g_useMathematicalKnot)
-    {
-        ropePoints = CableGeneration::generateMathematicalKnotPolyline(g_mathematicalKnotName);
-    }
-    else if (g_cfg.randomCable.enabled)
-    {
-        ropePoints = CableGeneration::generateRandomCableMessPolyline(
-            g_cfg.layout,
-            g_cfg.rope,
-            g_cfg.randomCable,
-            g_cfg.groundY);
-    }
-    else
-    {
-        ropePoints = CableGeneration::generateStraightCablePolyline(g_cfg.layout, g_cfg.rope);
-    }
-
     g_cablePieces.push_back(std::move(ropePoints));
 }
 
@@ -3743,9 +3258,6 @@ static void timeStep()
 
     for (unsigned int step = 0; step < stepsPerFrame; ++step)
     {
-        if (g_pullEnabled)
-            applyPullForces(model, dt, g_cablePieceRanges, g_cfg.physics);
-
         Simulation::getCurrent()->getTimeStep()->step(*model);
 
         // Per-substep contact/solver diagnostics. Penetration and normal-flip
@@ -3807,17 +3319,10 @@ static void timeStep()
             else if (g_catalogRunEnabled)
             {
                 evaluateAndRecordCatalogSample(false);
-                if (g_catalogMaxSamples > 0 && g_catalogSamplesWritten >= g_catalogMaxSamples)
-                {
-                    g_catalogRunEnabled = false;
-                    std::cout << "[knot-catalog] reached maxSamples="
-                              << g_catalogSamplesWritten
-                              << ", output=" << g_knotSeedCatalogPath << std::endl;
-                    g_stopRequested = true;
-                    return;
-                }
-
-                generateNextCatalogSeed();
+                g_catalogRunEnabled = false;
+                std::cout << "[knot-catalog] wrote " << g_catalogSamplesWritten
+                          << " sample(s), output=" << g_knotSeedCatalogPath << std::endl;
+                g_stopRequested = true;
                 return;
             }
             else if (g_evalRunEnabled)
@@ -3829,22 +3334,6 @@ static void timeStep()
                     g_evalRunEnabled = false;
                     std::cout << "[cut-eval] finished " << g_evalSamplesWritten
                               << " sample(s), output=" << g_evalOutputPath << std::endl;
-                    g_stopRequested = true;
-                    return;
-                }
-
-                generateNextCutEvalSeed();
-                return;
-            }
-            else if (g_evalCutsToZeroOracleOnly)
-            {
-                evaluateAndRecordCutsToZeroOracleSample();
-                ++g_evalCurrentIndex;
-                if (g_evalCurrentIndex >= g_evalSeeds.size())
-                {
-                    g_evalCutsToZeroOracleOnly = false;
-                    std::cout << "[ctz-oracle] finished " << g_evalSamplesWritten
-                              << " sample(s), output=" << g_evalCutsToZeroOracleOutputPath << std::endl;
                     g_stopRequested = true;
                     return;
                 }
@@ -3867,11 +3356,6 @@ static void timeStep()
 
                 generateNextCutEvalSeed();
                 return;
-            }
-            else
-            {
-                if (!g_useDirectRandomSeed)
-                    evaluateCurrentCableTanglement(true);
             }
         }
 
