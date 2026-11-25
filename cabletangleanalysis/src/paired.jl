@@ -43,11 +43,17 @@ function _rank_biserial(diff)
     return denominator == 0 ? 0.0 : (positive - negative) / denominator
 end
 
+# Exact small-sample tests can round marginally outside [0, 1]; downstream
+# multiple-testing adjustment rejects such values, so clamp every p-value.
+function _clamp_pvalue(p)
+    return isfinite(p) ? clamp(p, 0.0, 1.0) : NaN
+end
+
 function _paired_pvalue(diff)
     nonzero = abs.(diff) .> 1e-12
     any(nonzero) || return 1.0
     try
-        return pvalue(SignedRankTest(diff[nonzero]))
+        return _clamp_pvalue(pvalue(SignedRankTest(diff[nonzero])))
     catch
         return NaN
     end
@@ -58,7 +64,7 @@ function _sign_pvalue(diff)
     nonzero = finite[abs.(finite) .> 1e-12]
     length(nonzero) < 2 && return 1.0
     try
-        return pvalue(SignTest(nonzero))
+        return _clamp_pvalue(pvalue(SignTest(nonzero)))
     catch
         return NaN
     end
@@ -68,7 +74,7 @@ end
 # This is the unconditional sensitivity check; it does not drive plot markers.
 function _unconditional_better_pvalue(n_improved::Int, n::Int)
     (n <= 0 || n_improved <= 0) && return 1.0
-    return ccdf(Binomial(n, 0.5), n_improved - 1)
+    return _clamp_pvalue(ccdf(Binomial(n, 0.5), n_improved - 1))
 end
 
 function _ks_statistic(x, y)
@@ -114,7 +120,7 @@ function _symmetry_pvalue(diff; nboot = 1000, seed = 20240505)
         flipped = ifelse.(rand(rng, Bool, length(centred)), centred, -centred)
         _ks_statistic(flipped, -flipped) >= observed && (more_extreme += 1)
     end
-    return (more_extreme + 1) / (nboot + 1)
+    return _clamp_pvalue((more_extreme + 1) / (nboot + 1))
 end
 
 function _bootstrap_median_ci(diff; nboot = 10_000, seed = 20240505)
@@ -263,7 +269,8 @@ function _paired_comparison_rows(
     adjusted(values) = begin
         result = fill(NaN, length(values))
         valid = findall(isfinite.(values))
-        isempty(valid) || (result[valid] = adjust(values[valid], BenjaminiHochberg()))
+        isempty(valid) ||
+            (result[valid] = adjust(clamp.(values[valid], 0.0, 1.0), BenjaminiHochberg()))
         result
     end
 

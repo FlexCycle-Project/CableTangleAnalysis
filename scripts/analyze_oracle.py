@@ -351,7 +351,7 @@ def main() -> None:
     parser.add_argument(
         "--variants",
         nargs="+",
-        default=["zero", "current", "high"],
+        default=["aggregate"],
         help="Creep variants to analyze",
     )
     args = parser.parse_args()

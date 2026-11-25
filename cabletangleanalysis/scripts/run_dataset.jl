@@ -135,7 +135,7 @@ function main(args)
     end
     dataset_root = abspath(first_arg)
     isdir(dataset_root) || error("dataset root is not a directory: $dataset_root")
-    variants = length(args) > 1 ? String.(args[2:end]) : ["zero", "current", "high"]
+    variants = length(args) > 1 ? String.(args[2:end]) : ["aggregate"]
 
     for variant in variants
         run_variant(dataset_root, variant)
