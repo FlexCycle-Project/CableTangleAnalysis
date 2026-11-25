@@ -974,7 +974,6 @@ static void appendCatalogRows(
 
     // Catalog-level entanglement score: each term is min-max normalized using
     // catalog-derived constants so raw scale differences do not dominate.
-    // Normalization ranges are fixed from knot_seed_catalog_v3.tsv (403 entries).
     // Values outside the catalog range are clamped to [0, 1].
     auto normClamp = [](Real v, Real mn, Real mx) -> Real {
         if (mx <= mn) return static_cast<Real>(0);

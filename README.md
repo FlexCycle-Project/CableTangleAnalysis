@@ -13,7 +13,6 @@ This branch (`linux`) contains the Linux port of the demo and the batch analysis
 - PCA-derived complexity score trained on non-threading geometric metrics.
 - Knot type detection and localization through KymoKnot (top-down search by default).
 - Unattended catalog generation, cut-heuristic evaluation, and cuts-to-zero evaluation.
-- PCA helper script for exploring catalog metrics and generating an HTML scatter plot.
 
 ## Requirements
 
@@ -487,42 +486,6 @@ Catalog rows include, among others:
 - topology/geometry: `knotSpanFraction`, `proximityScore`, `totalCurvature`, `outsideKnotCurvature`, `totalCurvatureDensity`, `outsideKnotCurvatureDensity`
 - `entanglementScore`, a catalog-normalized combination of threading, close pairs, contact participation, knot span, outside-knot curvature, extra knots, and proximity
 
-Reference artifacts in `Demos/MyCableDemo/`:
-
-| File | Purpose |
-| --- | --- |
-| `knot_seed_catalog_v3.tsv` | Full catalog example |
-| `knot_seed_catalog_v3_sorted_by_type_crossings.tsv` | Catalog sorted by knot type and crossing count |
-| `knot_seed_catalog_v3_trimmed_metrics.tsv` | Reduced metric columns |
-| `knot_seed_catalog_v3_pca_A_density.tsv` | Density-normalized PCA input |
-| `knot_seed_catalog_v3_pca_A_density_pca_*` | PCA coordinates, loadings, and plot |
-| `knot_cut_eval_v3.tsv` | Cut-heuristic evaluation example |
-| `knot_cuts_to_zero_v3.tsv` | Cuts-to-zero evaluation example |
-
-The checked-in `knot_cut_eval_v3.tsv` and `knot_cuts_to_zero_v3.tsv` files predate the random-hoop and biggest-hoop strategies; new evaluation runs include the additional columns.
-
-### PCA workflow
-
-`run_pca.py` is the older PCA visualization helper and defaults to density/threading features. The dataset pipeline's complexity score is fitted by `cabletangleanalysis/src/complexity.jl` with the five non-threading metrics described above.
-
-After producing a density-normalized metrics table, run:
-
-```bash
-python3 Demos/MyCableDemo/run_pca.py \
-  Demos/MyCableDemo/knot_seed_catalog_v3_pca_A_density.tsv
-```
-
-The script requires NumPy and writes `<prefix>_pca_coords.tsv`, `<prefix>_pca_loadings.tsv`, and `<prefix>_pca_plot.html`. Useful options:
-
-```bash
-python3 Demos/MyCableDemo/run_pca.py INPUT.tsv \
-  --features totalHoopDensity threadedHoopDensity threadingDensity \
-  --pc-count 3 \
-  --output-prefix my_analysis \
-  --title "My cable PCA" \
-  --spread 0.25
-```
-
 ## Configuration
 
 Most simulation defaults live in [`Demos/MyCableDemo/CablePhysics.h`](Demos/MyCableDemo/CablePhysics.h):
@@ -539,7 +502,7 @@ Scene construction, keyboard bindings, evaluation orchestration, and output path
 
 | Path | Contents |
 | --- | --- |
-| `Demos/MyCableDemo/` | Cable demo, physics helpers, analyzers, evaluation data, legacy PCA script |
+| `Demos/MyCableDemo/` | Cable demo, physics helpers, analyzers |
 | `scripts/` | Dataset pipeline, parallel topology audit runner, and PCA complexity analysis |
 | `Demos/Visualization/` | OpenGL/imgui visualization helpers |
 | `PositionBasedDynamics/` | PBD/XPBD constraint library |
@@ -548,7 +511,7 @@ Scene construction, keyboard bindings, evaluation orchestration, and output path
 | `extern/` | Bundled third-party libraries |
 | `KymoKnot-clone/` | Bundled KymoKnot knot analyzer |
 | `cabletangleanalysis/` | Julia analysis submodule (PCA, correlations, cut-strategy comparisons) |
-| `data/` | Shaders, models, and scene data |
+| `data/` | Runtime shaders (geometry is generated procedurally) |
 | `bin/` | Build output (ignored by Git) |
 | `build/` | CMake build tree (ignored by Git) |
 
