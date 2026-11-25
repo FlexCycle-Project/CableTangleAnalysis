@@ -19,7 +19,7 @@ KNTID_wspace * KNTID_wspace_init ( KNTID_ws_var *init)
 	}
 	ws->buffer_dim=init->buffer_dim;
 	ws->alex_dim=init->alex_dim;
-	ws->known_knots=&_ktable;
+	ws->known_knots=(KNTid *)_ktable;
 	//if (ws->known_knots==NULL )
 	//{
 	//	failed("In KNTID_wspace_init.\nUnable to allocate memory for knots table\n");

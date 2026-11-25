@@ -161,7 +161,7 @@ void read_command_line (struct param_t *param, int argc, char **argv)
 					failed ("Can not open file passed with option -P.");
 				}
 				//this must become a function.
-				int len=2048;
+				size_t len=2048;
 				char *hdr= (char *) malloc(len);
 				getline(&hdr,&len,param->fin_prev_search);
 				getline(&hdr,&len,param->fin_prev_search);
@@ -293,7 +293,7 @@ void set_option_behaviour (struct param_t *param, struct options_t *options)
 		{
 			failed ("Can not open file passed with option -P.");
 		}
-		int len=2048;
+		size_t len=2048;
 		char *hdr= (char *) malloc(len);
 		getline(&hdr,&len,param->fin_prev_search);
 		getline(&hdr,&len,param->fin_prev_search);
@@ -454,7 +454,7 @@ void set_search_brackets_linear 	(struct param_t *param, int cnt, int arc_len)
 {
 	if(param->f_prev_search)
 	{
-		int len=1024;
+		size_t len=1024;
 		char *prev_line=(char*)malloc(len);
 		getline(&prev_line,&len,param->fin_prev_search);
 		char *tok;
@@ -519,7 +519,7 @@ void set_search_brackets_ring 	(struct param_t *param, int cnt, int arc_len)
 		}
 	}
 	if(param->f_prev_search) {
-		int len=1024;
+		size_t len=1024;
 		char *prev_line=(char*)malloc(len);
 		getline(&prev_line,&len,param->fin_prev_search);
 		char *tok;
