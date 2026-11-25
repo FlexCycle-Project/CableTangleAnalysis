@@ -506,15 +506,15 @@ Scene construction, keyboard bindings, evaluation orchestration, and output path
 | `Utils/` | File system, scene loading, and utility code |
 | `extern/` | Bundled third-party libraries |
 | `KymoKnot-clone/` | Bundled KymoKnot knot analyzer |
-| `cabletangleanalysis/` | Julia analysis submodule (PCA, correlations, cut-strategy comparisons) |
+| `cabletangleanalysis/` | Julia analysis package (PCA, correlations, cut-strategy comparisons) |
 | `data/` | Runtime shaders (geometry is generated procedurally) |
 | `bin/` | Build output (ignored by Git) |
 | `build/` | CMake build tree (ignored by Git) |
 
-The Julia analysis lives in the `cabletangleanalysis` submodule. After cloning, initialize it with:
+The Julia analysis package is vendored in `cabletangleanalysis/`. Install its dependencies once with:
 
 ```bash
-git submodule update --init --recursive
+julia --project=cabletangleanalysis -e 'using Pkg; Pkg.instantiate()'
 ```
 
 ## Troubleshooting

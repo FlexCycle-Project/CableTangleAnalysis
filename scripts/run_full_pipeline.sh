@@ -256,7 +256,7 @@ if [ "$RUN_COMPLEXITY" -eq 1 ]; then
   [ -f "$JULIA_PROJECT/Project.toml" ] || \
     die "Julia project not found: $JULIA_PROJECT (set JULIA_PROJECT)"
   [ -f "$ROOT/cabletangleanalysis/scripts/run_dataset.jl" ] || \
-    die "Julia analysis driver missing; initialize the cabletangleanalysis submodule"
+    die "Julia analysis driver missing: $ROOT/cabletangleanalysis/scripts/run_dataset.jl (set JULIA_PROJECT)"
   echo "checking Julia analysis environment"
   "$JULIA_BIN" --project="$JULIA_PROJECT" \
     -e 'using CableTangleAnalysis' >/dev/null 2>&1 || \

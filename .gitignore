@@ -16,6 +16,9 @@ KymoKnot-clone/*.x
 KymoKnot-clone/qhull-2012.1/bin/
 Utils/Version.h
 
+# Julia analysis datasets (kept locally, not tracked).
+cabletangleanalysis/data/
+
 # Local run artifacts and editor state.
 backups/
 imgui.ini
