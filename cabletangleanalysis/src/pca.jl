@@ -133,12 +133,20 @@ function run_pca(settings::Settings = DEFAULT_SETTINGS;
 
     mkpath(outdir)
 
+    # Small datasets can yield fewer than three components (three samples
+    # span at most two dimensions after centering).  Only draw the panels
+    # that the fitted model actually supports.
+    ncomp = size(scores, 1)
+    panels = Tuple{Int, Int, String, Int}[]
+    ncomp >= 2 && push!(panels, (1, 2, "PC1 vs PC2", 1))
+    ncomp >= 3 && push!(panels, (1, 3, "PC1 vs PC3", 2))
+    ncomp >= 3 && push!(panels, (2, 3, "PC2 vs PC3", 3))
+    if isempty(panels)
+        @warn "PCA produced $ncomp component(s); skipping 2D projection figure"
+        return model, scores
+    end
+
     fig = Figure(size = (2000, 700), fontsize = 25)
-    panels = [
-        (1, 2, "PC1 vs PC2", 1),
-        (1, 3, "PC1 vs PC3", 2),
-        (2, 3, "PC2 vs PC3", 3),
-    ]
     axes = []
     for (x_component, y_component, title, column) in panels
         ax = Axis(fig[1, column];
