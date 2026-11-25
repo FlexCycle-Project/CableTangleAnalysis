@@ -79,9 +79,9 @@ function validate_metas(seed_dirs)
     reference_name = first(sort(collect(keys(metas))))
     reference = metas[reference_name]
     for key in config_keys
-        expected = get(reference, key, missing)
+        expected = get(reference, key, "")
         for (name, meta) in metas
-            actual = get(meta, key, missing)
+            actual = get(meta, key, "")
             actual == expected || error(
                 "configuration mismatch for '$key': $reference_name=$expected, $name=$actual",
             )

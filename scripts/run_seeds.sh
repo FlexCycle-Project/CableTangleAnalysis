@@ -126,6 +126,12 @@ run_one() {
     local seed="$1"
     local dir="$OUT/seed_${seed}"
 
+    # --force replaces the seed directory so no stale optional files (for
+    # example an old audit trace) survive from a previous configuration.
+    if (( FORCE == 1 )) && [[ -d "$dir" ]]; then
+        rm -rf -- "$dir"
+    fi
+
     if (( FORCE == 0 )) && [[ -f "$dir/meta.tsv" ]] && \
        grep -q $'^status\tcomplete$' "$dir/meta.tsv"; then
         echo "[run_seeds] skip seed=$seed (complete)"
