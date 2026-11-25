@@ -68,11 +68,7 @@ Knot-type analysis shells out to `KymoKnot-clone/KymoKnot_linear.x`. Build it on
 make -C KymoKnot-clone
 ```
 
-If you use the binary already present in the repository, make sure it is executable:
-
-```bash
-chmod +x KymoKnot-clone/KymoKnot_linear.x
-```
+The `KymoKnot_linear.x` binary is built locally and is not tracked in Git.
 
 `MyCableDemo` looks for KymoKnot next to the executable (`bin/../KymoKnot-clone`) and falls back to `KymoKnot-clone` relative to the working directory. You can override the location:
 

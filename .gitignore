@@ -10,3 +10,8 @@ __pycache__/
 
 # Separate paper repository; not part of the CableSim project.
 latex_paper/
+
+# Local build outputs (rebuilt by CMake and `make -C KymoKnot-clone`).
+KymoKnot-clone/*.x
+KymoKnot-clone/qhull-2012.1/bin/
+Utils/Version.h
