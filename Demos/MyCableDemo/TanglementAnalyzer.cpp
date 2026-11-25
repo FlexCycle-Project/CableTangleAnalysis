@@ -910,10 +910,9 @@ namespace
             : crossPieceProximitySum / static_cast<Real>(segments.size());
 
         const Real samePieceWeight = static_cast<Real>(0.1);
-        snapshot.entanglementScore =
+        snapshot.proximityScore =
             snapshot.crossPieceProximityScore +
             samePieceWeight * snapshot.samePieceProximityScore;
-        snapshot.proximityScore = snapshot.entanglementScore;
 
         for (size_t pieceIndex = 0; pieceIndex < ropePieces.size(); ++pieceIndex)
         {
@@ -1122,23 +1121,6 @@ TanglementAnalyzer::TanglementAnalysisResult TanglementAnalyzer::analyzeTangleme
         false);
 }
 
-TanglementAnalyzer::TanglementMetricsSnapshot TanglementAnalyzer::evaluateContinuousEntanglementMetrics(
-    const std::vector<std::vector<Vector3r>>& ropePieces,
-    const std::vector<SelfCollisionContact>& contacts,
-    const RopeConfig& ropeCfg,
-    const SelfCollisionConfig& collisionCfg)
-{
-    const std::vector<CrossingEvent> noCrossings;
-    const std::vector<PBD::KymoKnotAnalysisResult> noKymoResults;
-    return buildTanglementMetricsSnapshot(
-        noCrossings,
-        ropePieces,
-        contacts,
-        noKymoResults,
-        ropeCfg,
-        collisionCfg);
-}
-
 TanglementAnalyzer::ThreadingMetricsSnapshot TanglementAnalyzer::computeThreadingMetrics(
     const TanglementAnalysisResult& result)
 {
@@ -1206,8 +1188,7 @@ void TanglementAnalyzer::printTanglementReport(
               << " (" << result.metrics.contactParticipationCount << ")"
               << " crossings=" << result.metrics.gravityCrossings
               << std::endl;
-    std::cout << "  global: entanglementScore=" << result.metrics.entanglementScore
-              << " proximity=" << result.metrics.proximityScore
+    std::cout << "  global: proximity=" << result.metrics.proximityScore
               << " cross=" << result.metrics.crossPieceProximityScore
               << " same=" << result.metrics.samePieceProximityScore
               << " closePairs=" << result.metrics.closePairCount

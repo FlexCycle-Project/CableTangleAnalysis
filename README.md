@@ -9,7 +9,7 @@ This branch (`linux`) contains the Linux port of the demo and the batch analysis
 - Interactive cable simulation with grab-and-drag manipulation, cutting, end pulls, gravity, and ground contact.
 - Random cable generation from reproducible seeds, plus mathematical knot presets such as `5_2`.
 - Self-collision detection with a side-switch detector and rest-state creep.
-- Tanglement analysis: hoop crossings, threading counts, knot spans, self-collision/close-pair statistics, curvature densities, and a catalog-level entanglement score.
+- Tanglement analysis: hoop crossings, threading counts, knot spans, self-collision/close-pair statistics, and curvature densities.
 - PCA-derived complexity score trained on non-threading geometric metrics.
 - Knot type detection and localization through KymoKnot (top-down search by default).
 - Unattended catalog generation, cut-heuristic evaluation, and cuts-to-zero evaluation.
@@ -342,7 +342,7 @@ Outputs:
 | `analysis_julia/<variant>/figures/cut_eval/cut_eval_comparison.pdf` | Single-cut comparison using threading reduction |
 | `analysis_julia/<variant>/figures/cut_eval/cut_eval_comparison_complexity.pdf` | Single-cut comparison using complexity reduction |
 
-The simulation and strategy evaluation remain complexity-agnostic; the PCA score is applied in post-processing. The legacy `entanglementScore` column is still written by the catalog, but `complexity_score` is the PCA-derived score.
+The simulation and strategy evaluation remain complexity-agnostic: the catalog stores only raw metrics, and the PCA-derived `complexity_score` is computed from that generated dataset in the Julia analysis (`cabletangleanalysis/`).
 
 ### Oracle analysis
 
@@ -480,7 +480,6 @@ Catalog rows include, among others:
 - hoop and threading counts: `totalHoopCount`, `threadedHoopCount`, `totalThreadingCount`
 - collision statistics: `selfCollisionCount`, `closePairCount`, `contactParticipationCount`, `minPairDistance`
 - topology/geometry: `knotSpanFraction`, `proximityScore`, `totalCurvature`, `outsideKnotCurvature`, `totalCurvatureDensity`, `outsideKnotCurvatureDensity`
-- `entanglementScore`, a catalog-normalized combination of threading, close pairs, contact participation, knot span, outside-knot curvature, extra knots, and proximity
 
 ## Configuration
 

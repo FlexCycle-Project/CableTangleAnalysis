@@ -48,7 +48,6 @@ public:
         Real knotSpanFraction = static_cast<Real>(0.0);
         int gravityCrossings = 0;
         size_t contactParticipationCount = 0;
-        Real entanglementScore = static_cast<Real>(0.0);
         Real proximityScore = static_cast<Real>(0.0);
         Real crossPieceProximityScore = static_cast<Real>(0.0);
         Real samePieceProximityScore = static_cast<Real>(0.0);
@@ -90,12 +89,6 @@ public:
         PBD::KymoKnotSearchMode searchMode);
 
     static TanglementAnalysisResult analyzeTanglementGeometryOnly(
-        const std::vector<std::vector<Vector3r>>& ropePieces,
-        const std::vector<SelfCollisionContact>& contacts,
-        const RopeConfig& ropeCfg,
-        const SelfCollisionConfig& collisionCfg);
-
-    static TanglementMetricsSnapshot evaluateContinuousEntanglementMetrics(
         const std::vector<std::vector<Vector3r>>& ropePieces,
         const std::vector<SelfCollisionContact>& contacts,
         const RopeConfig& ropeCfg,

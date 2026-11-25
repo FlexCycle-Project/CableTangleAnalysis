@@ -908,7 +908,7 @@ static void appendCatalogRows(
             << "\tcontactParticipationCount\tminPairDistance\tknotSpanFraction\tproximityScore"
             << "\tcrossPieceProximityScore\tsamePieceProximityScore"
             << "\ttotalCurvature\toutsideKnotCurvature"
-            << "\ttotalCurvatureDensity\toutsideKnotCurvatureDensity\tentanglementScore\n";
+            << "\ttotalCurvatureDensity\toutsideKnotCurvatureDensity\n";
     }
 
     const TanglementAnalyzer::ThreadingMetricsSnapshot threading =
@@ -972,29 +972,8 @@ static void appendCatalogRows(
     const Real finiteMinDistance =
         std::isfinite(metrics.minimumPairDistance) ? metrics.minimumPairDistance : static_cast<Real>(-1.0);
 
-    // Catalog-level entanglement score: each term is min-max normalized using
-    // catalog-derived constants so raw scale differences do not dominate.
-    // Values outside the catalog range are clamped to [0, 1].
-    auto normClamp = [](Real v, Real mn, Real mx) -> Real {
-        if (mx <= mn) return static_cast<Real>(0);
-        return std::max(static_cast<Real>(0), std::min(static_cast<Real>(1), (v - mn) / (mx - mn)));
-    };
-    const Real nThreading   = normClamp(static_cast<Real>(threading.totalThreadingCount),           static_cast<Real>(0),     static_cast<Real>(110));
-    const Real nClosePair   = normClamp(static_cast<Real>(metrics.closePairCount),                  static_cast<Real>(914),   static_cast<Real>(3186));
-    const Real nContactPart = normClamp(static_cast<Real>(metrics.contactParticipationCount),       static_cast<Real>(4),     static_cast<Real>(137));
-    const Real nKnotSpan    = normClamp(metrics.knotSpanFraction,                                   static_cast<Real>(0),     static_cast<Real>(0.898));
-    const Real nOutsideCurv = normClamp(outsideKnotCurvatureDensity,                                static_cast<Real>(0.0),   static_cast<Real>(0.10));
-    const Real nProximity   = normClamp(metrics.proximityScore,                                     static_cast<Real>(0.016), static_cast<Real>(0.044));
-    // extraKnotCount kept unnormalized: it is 0 for all catalog entries but carries a
-    // large penalty (5.0) when multiple simultaneous knots are detected.
-    const Real catalogEntanglementScore =
-        static_cast<Real>(3.00) * nThreading   +
-        static_cast<Real>(0.24) * nClosePair   +
-        static_cast<Real>(0.17) * nContactPart +
-        static_cast<Real>(0.56) * nKnotSpan    +
-        static_cast<Real>(0.12) * nOutsideCurv +
-        static_cast<Real>(5.00) * static_cast<Real>(extraKnotCount) +
-        static_cast<Real>(0.42) * nProximity;
+    // The entanglement/complexity score is derived from this generated catalog
+    // by the Julia analysis; the catalog stores raw metrics only.
 
     out << std::fixed << std::setprecision(6);
     for (const auto& record : records)
@@ -1021,14 +1000,14 @@ static void appendCatalogRows(
             << metrics.knotSpanFraction << '\t'
             << metrics.proximityScore << '\t'
             << metrics.crossPieceProximityScore << '\t'
-            << metrics.samePieceProximityScore << '\t';
+            << metrics.samePieceProximityScore;
         if (writeLegacyClusterColumn)
-            out << static_cast<Real>(0.0) << '\t';
+            out << '\t' << static_cast<Real>(0.0);
         if (writeCurvatureRawColumns)
-            out << totalCurvature << '\t' << outsideKnotCurvature << '\t';
+            out << '\t' << totalCurvature << '\t' << outsideKnotCurvature;
         if (writeCurvatureDensityColumns)
-            out << totalCurvatureDensity << '\t' << outsideKnotCurvatureDensity << '\t';
-        out << catalogEntanglementScore << '\n';
+            out << '\t' << totalCurvatureDensity << '\t' << outsideKnotCurvatureDensity;
+        out << '\n';
     }
 
     std::cout << "[knot-catalog] wrote " << records.size()
