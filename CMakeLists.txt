@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(CableSimMin VERSION 0.1.0 LANGUAGES C CXX)
+project(CableSimMin VERSION 0.2.0 LANGUAGES C CXX)
 
 set(PROJECT_PATH ${CMAKE_SOURCE_DIR})
 set(CMAKE_CXX_STANDARD 17)
@@ -12,6 +12,17 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
+
+# Keep floating-point contraction identical across architectures (x86-64,
+# aarch64, ...). FMA contraction otherwise changes the last bits and can
+# diverge over the settling steps.
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-ffp-contract=off)
+endif()
+
+# Eigen's SIMD packet order differs between SSE/NEON; use the scalar path so
+# the same seed produces the same arithmetic on x86-64 and aarch64.
+add_compile_definitions(EIGEN_DONT_VECTORIZE)
 
 set(EIGEN3_INCLUDE_DIR
     ${CMAKE_SOURCE_DIR}/extern/eigen

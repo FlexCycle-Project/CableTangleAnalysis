@@ -1,4 +1,5 @@
 #include "CableGeneration.h"
+#include "DeterministicRandom.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,12 +24,8 @@ std::vector<Vector3r> generateRandomCableMessPolyline(
         minHeight,
         static_cast<Real>(0.0));
 
-    std::random_device rd;
-    const unsigned int seed = (randomCfg.seed != 0) ? randomCfg.seed : rd();
+    const unsigned int seed = (randomCfg.seed != 0) ? randomCfg.seed : 1u;
     std::mt19937 rng(seed);
-    std::uniform_real_distribution<Real> unit01(
-        static_cast<Real>(0.0),
-        static_cast<Real>(1.0));
 
     auto chooseTurn = [&]() -> int
     {
@@ -39,7 +36,7 @@ std::vector<Vector3r> generateRandomCableMessPolyline(
         if (totalWeight <= static_cast<Real>(1e-12))
             return 0;
 
-        const Real roll = unit01(rng) * totalWeight;
+        const Real roll = DeterministicRandom::unitReal<Real>(rng) * totalWeight;
         if (roll < randomCfg.straightChance)
             return 0;
         if (roll < randomCfg.straightChance + randomCfg.leftChance)

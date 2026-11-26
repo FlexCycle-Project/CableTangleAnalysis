@@ -110,9 +110,22 @@ The five core tables (`catalog.tsv`, `cut_eval.tsv`, `cuts_to_zero.tsv`, and
 the two stage-metrics files) are always required. Audit tables are optional
 when `--no-audit` is used.
 
-Two runs of the same seed with the same binary produce identical tables.
-Changing the compiler or build flags can change floating-point results, as in
-the original GUI pipeline.
+Two runs of the same seed with the same binary produce identical tables. The
+generator fixes every random source explicitly:
+
+- cable generation and cut-target sampling use `std::mt19937` through the
+  adapters in `cablegen/DeterministicRandom.h`, not implementation-defined
+  `std::uniform_*` distributions;
+- there is no `std::random_device` fallback;
+- KymoKnot's PRNG is seeded from the simulation seed, and qhull runs with a
+  fixed joggle seed (`QR1`);
+- the build disables floating-point contraction (`-ffp-contract=off`) and
+  Eigen vectorization, so x86-64 and aarch64 use the same arithmetic order.
+
+Outputs from older builds are not comparable: the legacy catalog used
+`std::random_device` and library distributions, and the GUI-era build enabled
+OpenMP. Different standard-library or libm versions can still differ in the
+last bits; use the same toolchain for a dataset that must be bit-identical.
 
 ## Parallel dataset generation
 

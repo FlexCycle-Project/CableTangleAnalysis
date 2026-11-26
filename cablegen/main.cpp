@@ -5,6 +5,7 @@
 #include "Simulation/Simulation.h"
 #include "CablePhysics.h"
 #include "CableGeneration.h"
+#include "DeterministicRandom.h"
 #include "TanglementAnalyzer.h"
 #include "TopologyAudit.h"
 #include "KymoKnotAnalyzer.h"
@@ -987,8 +988,7 @@ namespace
         if (targets.empty())
             return false;
 
-        std::uniform_int_distribution<size_t> dist(0, targets.size() - 1);
-        target = targets[dist(rng)];
+        target = targets[DeterministicRandom::uniformIndex(rng, targets.size())];
         return target.valid;
     }
 
@@ -1377,8 +1377,8 @@ namespace
             if (targets.empty())
                 break;
 
-            std::uniform_int_distribution<size_t> dist(0, targets.size() - 1);
-            const VirtualCutTarget& target = targets[dist(rng)];
+            const VirtualCutTarget& target =
+                targets[DeterministicRandom::uniformIndex(rng, targets.size())];
             if (!splitCablePieceAtEdge(pieces, target.pieceIndex, target.edgeIndex))
                 break;
 
@@ -1971,13 +1971,13 @@ static void evaluateAndRecordCutHeuristicSample()
         if (!randomTargets.empty() && g_evalRandomTrials > 0)
         {
             std::mt19937 rng(record.seed ^ 0x9E3779B9u);
-            std::uniform_int_distribution<size_t> dist(0, randomTargets.size() - 1);
             std::vector<Real> randomDeltas;
             randomDeltas.reserve(g_evalRandomTrials);
 
             for (unsigned int trial = 0; trial < g_evalRandomTrials; ++trial)
             {
-                const VirtualCutTarget& randomTarget = randomTargets[dist(rng)];
+                const VirtualCutTarget& randomTarget =
+                    randomTargets[DeterministicRandom::uniformIndex(rng, randomTargets.size())];
                 const int delta = computeAndRecordVirtualCutDeltaThreading(
                     ropePieces,
                     beforeThreading,
@@ -2004,13 +2004,13 @@ static void evaluateAndRecordCutHeuristicSample()
     if (beforeThreading > 0 && !hoopTargets.empty() && g_evalRandomTrials > 0)
     {
         std::mt19937 rng(record.seed ^ 0xA5A5A5A5u);
-        std::uniform_int_distribution<size_t> dist(0, hoopTargets.size() - 1);
         std::vector<Real> randomHoopDeltas;
         randomHoopDeltas.reserve(g_evalRandomTrials);
 
         for (unsigned int trial = 0; trial < g_evalRandomTrials; ++trial)
         {
-            const VirtualCutTarget& randomHoopTarget = hoopTargets[dist(rng)];
+            const VirtualCutTarget& randomHoopTarget =
+                hoopTargets[DeterministicRandom::uniformIndex(rng, hoopTargets.size())];
             const int delta = computeAndRecordVirtualCutDeltaThreading(
                 ropePieces,
                 beforeThreading,

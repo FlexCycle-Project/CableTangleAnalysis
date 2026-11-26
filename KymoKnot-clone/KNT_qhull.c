@@ -27,7 +27,8 @@ void qhull_init (int qhull_buffer_dim)
   {
     qhull_ismalloc = FALSE;
 
-    sprintf (qhull_flags, "qhull Qt QJ Fa Pp");
+    /* QR1 pins qhull's joggle seed; Pp silences precision chatter only. */
+    sprintf (qhull_flags, "qhull Qt QJ Fa Pp QR1");
     qhull_buffer = d1t(qhull_buffer_dim);
     qhull_is_init = 1;
   }
@@ -122,8 +123,6 @@ double qhull_dist_facet ( double p[3], double normalized_out_dir[3] )
         min_dist =  fabs(dist);
         prj_point = qh_projectpoint(point,facet,dist);
       }
-      else if(dist > KNT_EPSIL)
-        fprintf(stderr,"positive distance from hull! %12.8lf\n",dist);
 
     }
   }

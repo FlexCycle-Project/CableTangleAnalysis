@@ -60,6 +60,7 @@ add_executable(cablegen
     CablePhysics.h
     CableGeneration.cpp
     CableGeneration.h
+    DeterministicRandom.h
     TanglementAnalyzer.cpp
     TanglementAnalyzer.h
     TopologyAudit.cpp
