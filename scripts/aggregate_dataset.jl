@@ -55,6 +55,7 @@ function validate_metas(seed_dirs)
     config_keys = [
         "version", "creep", "creep_settle_steps", "creep_threshold", "dt",
         "random_trials", "ctz_max_cuts", "ctz_random_trials",
+        "ctz_oracle_max_nodes",
         "audit_steps", "audit_cuts", "audit_contact_eps", "audit_trace",
         "oracle", "audit",
     ]

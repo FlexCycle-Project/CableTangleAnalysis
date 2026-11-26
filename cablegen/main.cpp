@@ -118,6 +118,7 @@ static std::string g_evalStageMetricsOutputPath;
 static std::string g_evalCutsToZeroStageMetricsOutputPath;
 static unsigned int g_evalCutsToZeroMaxCuts = 10;
 static unsigned int g_evalCutsToZeroRandomTrials = 20;
+static bool g_evalCutsToZeroOracleEnabled = false;
 static unsigned long long g_evalCutsToZeroOracleMaxNodes = 5000000ULL;
 static size_t g_evalCurrentIndex = 0;
 static size_t g_evalSamplesWritten = 0;
@@ -406,7 +407,9 @@ static bool prepareCutsToZeroEvalOutputFile()
         << "\trandom_hoop_cuts_mean\trandom_hoop_cuts_std\trandom_hoop_resolved_rate"
         << "\tbiggest_hoop_cuts\tbiggest_hoop_resolved\thoop_count"
         << "\tsmallest_hoop_cuts\tsmallest_hoop_resolved"
-        << "\tmax_curvature_cuts\tmax_curvature_resolved\n";
+        << "\tmax_curvature_cuts\tmax_curvature_resolved"
+        << "\toracle_cuts\toracle_resolved\toracle_exhaustive"
+        << "\toracle_nodes\toracle_sequence\n";
 
     return prepareStageMetricsOutputFile(
         g_evalCutsToZeroStageMetricsOutputPath,
@@ -2221,6 +2224,68 @@ static void evaluateAndRecordCutsToZeroSample()
         }
     }
 
+    // Complete (multi-cut) oracle.  This is the exhaustive best-path search,
+    // as opposed to the single-cut oracle recorded in cut_eval.tsv.
+    const bool haveOracle = g_evalCutsToZeroOracleEnabled;
+    unsigned int oracleCuts = 0;
+    bool oracleResolved = false;
+    bool oracleExhaustive = false;
+    unsigned long long oracleNodes = 0;
+    std::string oracleSequence;
+
+    if (haveOracle)
+    {
+        OraclePathResult oracleResult;
+        if (beforeThreading == 0)
+        {
+            oracleResult.resolved = true;
+            oracleResult.exhaustive = true;
+        }
+        else
+        {
+            oracleResult = runCompleteOracleCutsToZero(
+                ropePieces,
+                g_evalCutsToZeroMaxCuts,
+                g_evalCutsToZeroOracleMaxNodes);
+        }
+
+        unsigned int replayCuts = 0;
+        bool replayResolved = false;
+        const bool replayOk = replayOraclePath(
+            ropePieces,
+            oracleResult.path,
+            makeStageContext("oracle", 0),
+            replayCuts,
+            replayResolved);
+
+        oracleNodes = oracleResult.nodes;
+        oracleCuts = oracleResult.resolved ? replayCuts : g_evalCutsToZeroMaxCuts;
+        oracleResolved = oracleResult.resolved && replayResolved;
+        oracleExhaustive = oracleResult.exhaustive && replayOk;
+
+        if (!replayOk)
+        {
+            oracleResolved = false;
+            oracleCuts = g_evalCutsToZeroMaxCuts;
+        }
+        else if (oracleResult.resolved && replayCuts != oracleResult.cuts)
+        {
+            std::cout << "[ctz-oracle] warning: search found "
+                      << oracleResult.cuts << " cuts but replay used "
+                      << replayCuts << " cuts for seed=" << record.seed
+                      << std::endl;
+        }
+
+        for (size_t i = 0; i < oracleResult.path.size(); ++i)
+        {
+            if (i > 0)
+                oracleSequence += ';';
+            oracleSequence += std::to_string(oracleResult.path[i].pieceIndex);
+            oracleSequence += ':';
+            oracleSequence += std::to_string(oracleResult.path[i].edgeIndex);
+        }
+    }
+
     std::ofstream out(g_evalCutsToZeroOutputPath, std::ios::app);
     if (!out)
     {
@@ -2248,7 +2313,20 @@ static void evaluateAndRecordCutsToZeroSample()
         << smallestHoopOutcome.cuts << '\t'
         << (smallestHoopOutcome.resolved ? 1 : 0) << '\t'
         << maxCurvatureOutcome.cuts << '\t'
-        << (maxCurvatureOutcome.resolved ? 1 : 0) << '\n';
+        << (maxCurvatureOutcome.resolved ? 1 : 0) << '\t';
+    if (haveOracle)
+    {
+        out << oracleCuts << '\t'
+            << (oracleResolved ? 1 : 0) << '\t'
+            << (oracleExhaustive ? 1 : 0) << '\t'
+            << oracleNodes << '\t'
+            << oracleSequence;
+    }
+    else
+    {
+        out << "\t\t\t\t";
+    }
+    out << '\n';
 
     ++g_evalSamplesWritten;
     std::cout << "[cuts-to-zero] seed=" << record.seed
@@ -2266,8 +2344,15 @@ static void evaluateAndRecordCutsToZeroSample()
               << " smallestHoopResolved=" << (smallestHoopOutcome.resolved ? 1 : 0)
               << " maxCurvatureCuts=" << maxCurvatureOutcome.cuts
               << " maxCurvatureResolved=" << (maxCurvatureOutcome.resolved ? 1 : 0)
-              << " hoops=" << hoopCount
-              << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
+              << " hoops=" << hoopCount;
+    if (haveOracle)
+    {
+        std::cout << " oracleCuts=" << oracleCuts
+                  << " oracleResolved=" << (oracleResolved ? 1 : 0)
+                  << " oracleExhaustive=" << (oracleExhaustive ? 1 : 0)
+                  << " oracleNodes=" << oracleNodes;
+    }
+    std::cout << " (" << (g_evalCurrentIndex + 1) << "/" << g_evalSeeds.size() << ")"
               << std::endl;
 }
 
@@ -2852,6 +2937,10 @@ int main(int argc, char** argv)
         {
             ctzRandomTrials = static_cast<unsigned int>(std::stoul(arg.substr(20)));
         }
+        else if (arg.rfind("--ctz-oracle-max-nodes=", 0) == 0)
+        {
+            g_evalCutsToZeroOracleMaxNodes = std::stoull(arg.substr(23));
+        }
         else if (arg.rfind("--audit-steps=", 0) == 0)
         {
             auditSteps = static_cast<unsigned int>(std::stoul(arg.substr(14)));
@@ -2883,6 +2972,7 @@ int main(int argc, char** argv)
                 << "  [--creep=V] [--creep-settle-steps=N] [--creep-threshold=V]\n"
                 << "  [--dt=V] [--random-trials=N]\n"
                 << "  [--ctz-max-cuts=N] [--ctz-random-trials=N]\n"
+                << "  [--ctz-oracle-max-nodes=N]\n"
                 << "  [--audit-steps=N] [--audit-cuts=N] [--audit-contact-eps=V]\n"
                 << "  [--no-oracle] [--no-audit] [--audit-trace]\n";
             return 0;
@@ -2994,6 +3084,7 @@ int main(int argc, char** argv)
         g_evalCutsToZeroOutputPath = ctzPath;
         g_evalCutsToZeroStageMetricsOutputPath = ctzStagePath;
         g_evalCutsToZeroEnabled = true;
+        g_evalCutsToZeroOracleEnabled = runOracle;
         g_evalCutsToZeroMaxCuts = ctzMaxCuts;
         g_evalCutsToZeroRandomTrials = ctzRandomTrials;
         g_evalSamplesWritten = 0;
@@ -3008,6 +3099,7 @@ int main(int argc, char** argv)
             std::cout << "[cablegen] cuts-to-zero seed=" << seed << " output=" << ctzPath << std::endl;
             runSettleStage();
             g_evalCutsToZeroEnabled = false;
+            g_evalCutsToZeroOracleEnabled = false;
             ok = ok && g_evalCurrentIndex >= g_evalSeeds.size()
                 && std::filesystem::exists(ctzPath);
         }
@@ -3086,6 +3178,7 @@ int main(int argc, char** argv)
          << "random_trials\t" << randomTrials << "\n"
          << "ctz_max_cuts\t" << ctzMaxCuts << "\n"
          << "ctz_random_trials\t" << ctzRandomTrials << "\n"
+         << "ctz_oracle_max_nodes\t" << g_evalCutsToZeroOracleMaxNodes << "\n"
          << "audit_steps\t" << auditSteps << "\n"
          << "audit_cuts\t" << auditCuts << "\n"
          << "audit_contact_eps\t" << g_topologyAuditSettings.contactEpsilon << "\n"

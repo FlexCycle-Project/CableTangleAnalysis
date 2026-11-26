@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(CableSimMin VERSION 0.2.0 LANGUAGES C CXX)
+project(CableSimMin VERSION 0.3.0 LANGUAGES C CXX)
 
 set(PROJECT_PATH ${CMAKE_SOURCE_DIR})
 set(CMAKE_CXX_STANDARD 17)
