@@ -150,9 +150,14 @@ The driver:
 - writes per-seed `run.log`, a `failed_seeds.txt`, and a `summary.tsv`,
 - exits non-zero if any seed failed.
 
-Use `--force` to re-run completed seeds. KymoKnot calls `abort()` on internal
-errors, so a pathological seed can kill its own process; the driver records it
-and continues with the remaining seeds.
+Use `--force` to re-run completed seeds. Each `cablegen` process peaks around
+150–250 MB, so size `--jobs` to fit the machine's memory (92 jobs is roughly
+15–25 GB). A pathological seed can still kill its own process; the driver
+records it and continues with the remaining seeds.
+
+KymoKnot localization occasionally asks qhull to close a 2–3 bead subchain.
+Those subchains are now returned as plain short arcs, which the knot
+identifier treats as the unknot, instead of calling `abort()`.
 
 ## Aggregate and run the Julia analysis
 

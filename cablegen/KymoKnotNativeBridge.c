@@ -33,8 +33,11 @@ static unsigned int g_seed_counter = 0;
 
 static KNTID_wspace *ensure_workspace(int n)
 {
-    const int required_alex = (2 * n > 2000) ? 2 * n : 2000;
-    const int required_buffer = (n > 1000) ? n : 1000;
+    /* ALX_wspace_alloc(N) allocates six (4*N) x (4*N) matrices, so an
+       inflated floor here costs gigabytes. The simplified chain never
+       exceeds n points, which is all Alexander's workspace needs. */
+    const int required_alex = (n > 4) ? n + 1 : 5;
+    const int required_buffer = (n > 4) ? n : 4;
 
     if (g_workspace != NULL &&
         required_alex <= g_workspace_alex_dim &&

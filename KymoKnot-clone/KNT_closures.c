@@ -120,8 +120,17 @@ KNTarc  KNTCqhull_hybrid_close_subchain ( KNTarc * ring_ptr, int start, int end)
 
   if( closed_len < 4 )
   {
-    free_d2t(coord_buffer);
-    failed("need at lest 4 points for a convex hull!");
+    /* Too short for a convex hull. Return the plain subchain; knot
+       identification treats fewer than four points as the unknot. */
+    KNTadd_coord( closed_len, coord_buffer, NULL, &arc );
+    KNTarc_SET_value( &arc, arc_type, ARC_ID_ANY, char );
+    KNTarc_SET_value( &arc, start, start, int );
+    KNTarc_SET_value( &arc, end, end, int );
+    strncpy( arc.closure, QHULLCLOSUREHYB, STR_OUT_MAXLEN );
+    free_d2t( coord_buffer );
+    if ( qhull_local_init )
+      qhull_terminate();
+    return arc;
   }
   for( i = 0 ; i < closed_len ; i++)
   {
@@ -360,8 +369,15 @@ KNTarc  KNTCqhull_close_subchain ( KNTarc * ring_ptr, int start, int end)
   closed_len = extract_subchain ( ring_ptr->len, ring_ptr->coord, start, end, coord_buffer );
   if( closed_len < 4 )
   {
-    free_d2t(coord_buffer);
-    failed("need at lest 4 points for a convex hull!");
+    KNTadd_coord( closed_len, coord_buffer, NULL, &arc );
+    KNTarc_SET_value( &arc, arc_type, ARC_ID_ANY, char );
+    KNTarc_SET_value( &arc, start, start, int );
+    KNTarc_SET_value( &arc, end, end, int );
+    strncpy( arc.closure, QHULLCLOSURE, STR_OUT_MAXLEN );
+    free_d2t( coord_buffer );
+    if ( qhull_local_init )
+      qhull_terminate();
+    return arc;
   }
   for( i = 0 ; i < closed_len ; i++)
   {
@@ -724,7 +740,11 @@ int  extract_subchain     ( int N,double ** chain, int start, int end,  double *
   // I want both start and end to be included in the copied
   // subchain. Therefore I add 1 to its length
 
-  if(start < end)
+  if(start == end)
+  {
+    len_subchain = 1;
+  }
+  else if(start < end)
   {
     len_subchain = end - start + 1;
   }

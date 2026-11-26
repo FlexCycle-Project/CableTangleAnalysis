@@ -96,7 +96,6 @@ done
 
 mkdir -p "$OUT"
 FAILED="$OUT/failed_seeds.txt"
-: > "$FAILED"
 
 seeds=()
 if [[ -f "$SEEDS" ]]; then
@@ -121,6 +120,7 @@ else
 fi
 
 [[ ${#seeds[@]} -gt 0 ]] || die "no seeds selected"
+: > "$FAILED"
 
 run_one() {
     local seed="$1"
